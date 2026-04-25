@@ -59,7 +59,7 @@ func TestParseImageURL(t *testing.T) {
 func TestPromptsIncludePageSideAndFolioSide(t *testing.T) {
 	style := fallbackStyle("quiet magazine", "")
 	kit := fallbackCreativeKit(buildRequest{})
-	got := articlePrompt(2, "Test", style, kit, "article", article{Title: "A", Body: "Body"})
+	got := articlePrompt(2, "Test", style, kit, "article", article{Title: "A", Body: "Body"}, 1, 1)
 	if !strings.Contains(got, "left-hand page") || !strings.Contains(got, "Put page number 2 on the left side") {
 		t.Fatalf("left page prompt missing side instructions: %s", got)
 	}

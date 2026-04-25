@@ -52,8 +52,11 @@ type server struct {
 	cfg config
 }
 
+type apiKeyContextKey struct{}
+
 type styleRequest struct {
-	Style string `json:"style"`
+	Style  string `json:"style"`
+	APIKey string `json:"apiKey"`
 }
 
 type styleResponse struct {
@@ -68,6 +71,7 @@ type rssRequest struct {
 	Limit     int    `json:"limit"`
 	Style     string `json:"style"`
 	Workspace string `json:"workspace"`
+	APIKey    string `json:"apiKey"`
 }
 
 type generateArticlesRequest struct {
@@ -75,6 +79,7 @@ type generateArticlesRequest struct {
 	Style     string `json:"style"`
 	Count     int    `json:"count"`
 	Workspace string `json:"workspace"`
+	APIKey    string `json:"apiKey"`
 }
 
 type article struct {
@@ -83,6 +88,8 @@ type article struct {
 	Images   []string `json:"images"`
 	Source   string   `json:"source,omitempty"`
 	Enhanced bool     `json:"enhanced,omitempty"`
+	Kind     string   `json:"kind,omitempty"`
+	Pages    int      `json:"pages,omitempty"`
 }
 
 type buildRequest struct {
@@ -92,6 +99,7 @@ type buildRequest struct {
 	PageCount    int       `json:"pageCount"`
 	Articles     []article `json:"articles"`
 	Workspace    string    `json:"workspace"`
+	APIKey       string    `json:"apiKey"`
 }
 
 type buildResponse struct {
@@ -141,6 +149,7 @@ type renderPageRequest struct {
 	StyleReference string   `json:"styleReference"`
 	Reference      string   `json:"reference"`
 	Workspace      string   `json:"workspace"`
+	APIKey         string   `json:"apiKey"`
 }
 
 type renderPageResponse struct {
@@ -157,6 +166,7 @@ type templateRequest struct {
 	Style     magazineStyle `json:"style"`
 	Reference string        `json:"reference"`
 	Workspace string        `json:"workspace"`
+	APIKey    string        `json:"apiKey"`
 }
 
 type pdfRequest struct {
@@ -254,6 +264,7 @@ func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx := contextWithAPIKey(r.Context(), r.FormValue("apiKey"))
 	title := strings.TrimSpace(r.FormValue("title"))
 	style := strings.TrimSpace(r.FormValue("style"))
 	workspace, err := s.ensureWorkspace(r.FormValue("workspace"), style)
@@ -266,7 +277,7 @@ func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	enhanced, err := s.enhanceStyle(r.Context(), title, style, referencePath)
+	enhanced, err := s.enhanceStyle(ctx, title, style, referencePath)
 	if err != nil {
 		log.Printf("textgen style enhancement failed: %v", err)
 		enhanced = fallbackStyle(style, referencePath)
@@ -288,6 +299,7 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx := contextWithAPIKey(r.Context(), req.APIKey)
 	if req.Limit <= 0 || req.Limit > 50 {
 		req.Limit = 10
 	}
@@ -296,14 +308,14 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	articles, err := fetchRSS(r.Context(), req.URL, req.Limit)
+	articles, err := fetchRSS(ctx, req.URL, req.Limit)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
 	style := parseStyle(req.Style)
 	for i := range articles {
-		improved, err := s.rewriteArticleForStyle(r.Context(), articles[i], style)
+		improved, err := s.rewriteArticleForStyle(ctx, articles[i], style)
 		if err != nil {
 			log.Printf("textgen article rewrite failed for %q: %v", articles[i].Title, err)
 			continue
@@ -325,6 +337,7 @@ func (s *server) handleGenerateArticles(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx := contextWithAPIKey(r.Context(), req.APIKey)
 	if req.Count <= 0 || req.Count > 12 {
 		req.Count = 4
 	}
@@ -334,7 +347,7 @@ func (s *server) handleGenerateArticles(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	style := parseStyle(req.Style)
-	articles, err := s.generateArticles(r.Context(), req.Title, style, req.Count)
+	articles, err := s.generateArticles(ctx, req.Title, style, req.Count)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -352,6 +365,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx := contextWithAPIKey(r.Context(), req.APIKey)
 	req.PageCount = normalizePageCount(req.PageCount)
 	req.Articles = cleanArticles(req.Articles)
 	style := parseStyle(req.Style)
@@ -365,7 +379,13 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if req.Articles[i].Enhanced {
 			continue
 		}
-		improved, err := s.rewriteArticleForStyle(r.Context(), req.Articles[i], style)
+		var improved article
+		var err error
+		if req.Articles[i].Kind == "feature" {
+			improved, err = s.rewriteFeatureForStyle(ctx, req.Articles[i], style)
+		} else {
+			improved, err = s.rewriteArticleForStyle(ctx, req.Articles[i], style)
+		}
 		if err != nil {
 			log.Printf("textgen manual article rewrite failed for %q: %v", req.Articles[i].Title, err)
 			continue
@@ -373,7 +393,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		improved.Enhanced = true
 		req.Articles[i] = improved
 	}
-	kit, err := s.generateCreativeKit(r.Context(), req, style)
+	kit, err := s.generateCreativeKit(ctx, req, style)
 	if err != nil {
 		log.Printf("textgen creative kit failed: %v", err)
 		s.workspaceLog(workspace, "build: creative kit failed: %v", err)
@@ -393,6 +413,7 @@ func (s *server) handleRenderTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx := contextWithAPIKey(r.Context(), req.APIKey)
 	prompt := limitPrompt(fmt.Sprintf("Create one completely text-free magazine page layout template.\nSTYLE: %s\nTEMPLATE: %s\nShow only generic layout geometry: paper texture, margins, column rhythm, blank header band, blank footer band, empty image rectangles, pale rule lines and subtle placeholder blocks. Absolutely no readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no registration marks, no printing press technical marks, no UI and no moodboard. It should be a calm blank layout reference for later pages.", styleLine(req.Style, "template"), req.Style.Template), s.cfg.ImagegenMaxPromptChars)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Style.Name)
 	if err != nil {
@@ -400,7 +421,7 @@ func (s *server) handleRenderTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.workspaceLog(workspace, "render-template: start")
-	image, err := s.runImagegenWithRetry(r.Context(), workspace, 0, prompt, filterStrings([]string{req.Reference}), true)
+	image, err := s.runImagegenWithRetry(ctx, workspace, 0, prompt, filterStrings([]string{req.Reference}), true)
 	if err != nil {
 		s.workspaceLog(workspace, "render-template: failed: %v", err)
 		writeError(w, http.StatusBadGateway, err)
@@ -420,6 +441,7 @@ func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx := contextWithAPIKey(r.Context(), req.APIKey)
 	images := filterStrings([]string{req.StyleReference, req.Reference})
 	images = append(images, req.Page.Images...)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Page.Title)
@@ -428,7 +450,7 @@ func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.workspaceLog(workspace, "render-page: start page=%d title=%q refs=%d", req.Page.Number, req.Page.Title, len(images))
-	image, err := s.runImagegenWithRetry(r.Context(), workspace, req.Page.Number, limitPrompt(req.Page.Prompt, s.cfg.ImagegenMaxPromptChars), images, false)
+	image, err := s.runImagegenWithRetry(ctx, workspace, req.Page.Number, limitPrompt(req.Page.Prompt, s.cfg.ImagegenMaxPromptChars), images, false)
 	if err != nil {
 		s.workspaceLog(workspace, "render-page: failed page=%d: %v", req.Page.Number, err)
 		writeError(w, http.StatusBadGateway, err)
@@ -615,6 +637,30 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 	return a, nil
 }
 
+func (s *server) rewriteFeatureForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Turn this requested magazine feature page into a precise image-generation brief matching the publication style. The feature can be a crossword, comments page, quiz, TV/program listings, puzzle page, letters, classifieds, calendar, chart, or any other non-article department. Preserve the user's intent, but make it print-ready and specific about sections/modules. Body should be 700-1400 characters and describe what the page should contain.\n\nSTYLE: %s\n\nFEATURE TITLE: %s\nFEATURE REQUEST: %s", styleLine(style, "filler"), a.Title, compact(a.Body, 2400))
+	text, err := s.runTextgen(ctx, prompt, 900)
+	if err != nil {
+		return a, err
+	}
+	var out struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(extractJSONObject(text)), &out); err != nil {
+		return a, err
+	}
+	if strings.TrimSpace(out.Title) != "" {
+		a.Title = cleanText(out.Title)
+	}
+	if strings.TrimSpace(out.Body) != "" {
+		a.Body = cleanText(out.Body)
+	}
+	a.Kind = "feature"
+	a.Enhanced = true
+	return a, nil
+}
+
 func (s *server) generateArticles(ctx context.Context, title string, style magazineStyle, count int) ([]article, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of exactly %d objects. Each object must have title and body. Generate original fictional-but-plausible magazine articles that fit this publication. Do not use real copyrighted brands unless generic/current facts are unavoidable. Vary article types: one feature, one short news item, one practical/service piece, one opinion/interview/list if count allows. Body length 900-1500 characters each, ready for print layout.\n\nPUBLICATION: %s\nSTYLE: %s", count, emptyDefault(title, "Untitled Magazine"), styleLine(style, "article"))
 	text, err := s.runTextgen(ctx, prompt, 2200)
@@ -641,6 +687,7 @@ func (s *server) runTextgen(ctx context.Context, prompt string, maxTokens int) (
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.TextgenTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, s.cfg.TextgenCmd, s.cfg.TextgenModel, "-max-tokens", strconv.Itoa(maxTokens), prompt)
+	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -724,6 +771,7 @@ func (s *server) runImagegen(ctx context.Context, workspace string, pageNumber i
 	s.workspaceLog(workspace, "imagegen: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(prompt)), len(images), (len(args)-10)/2)
 	args = append(args, limitPrompt(prompt, s.cfg.ImagegenMaxPromptChars))
 	cmd := exec.CommandContext(cctx, s.cfg.ImagegenCmd, args...)
+	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -840,7 +888,8 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []page
 	title := emptyDefault(req.Title, "Untitled Magazine")
 	magType := emptyDefault(req.MagazineType, "magazine")
 	pages = append(pages, pagePlan{Number: 1, Kind: "cover", Title: "Cover", Prompt: coverPrompt(title, magType, style, req.Articles)})
-	articleIndex := 0
+	itemIndex := 0
+	itemPart := 0
 	for n := 2; n <= req.PageCount; n++ {
 		if n == req.PageCount {
 			pages = append(pages, pagePlan{Number: n, Kind: "back-page", Title: "Back page", Prompt: genericPrompt(n, title, style, kit, "back", "Create a strong back page: advert, subscription panel, teaser, index, or closing visual depending on the publication style.")})
@@ -850,14 +899,22 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []page
 			pages = append(pages, pagePlan{Number: n, Kind: "advert", Title: "Advert", Prompt: genericPrompt(n, title, style, kit, "advert", "Create a full-page fictional advert that belongs naturally in this publication. Use no real brands unless supplied by the article content.")})
 			continue
 		}
-		if articleIndex < len(req.Articles) {
-			a := req.Articles[articleIndex]
-			articleIndex++
-			kind := "article"
-			if len([]rune(a.Body)) > 1800 {
+		if itemIndex < len(req.Articles) {
+			a := req.Articles[itemIndex]
+			totalParts := normalizedArticlePages(a)
+			itemPart++
+			kind := strings.TrimSpace(a.Kind)
+			if kind == "" {
+				kind = "article"
+			}
+			if kind != "feature" && len([]rune(a.Body)) > 1800 {
 				kind = "feature"
 			}
-			pages = append(pages, pagePlan{Number: n, Kind: kind, Title: a.Title, Article: &a, Images: a.Images, Prompt: articlePrompt(n, title, style, kit, kind, a)})
+			pages = append(pages, pagePlan{Number: n, Kind: kind, Title: a.Title, Article: &a, Images: a.Images, Prompt: articlePrompt(n, title, style, kit, kind, a, itemPart, totalParts)})
+			if itemPart >= totalParts {
+				itemIndex++
+				itemPart = 0
+			}
 			continue
 		}
 		pages = append(pages, pagePlan{Number: n, Kind: "filler", Title: "Departments", Prompt: genericPrompt(n, title, style, kit, "filler", "Create a department/filler page with short recurring modules, briefs, reader notes, charts, sidebars, small adverts, captions, and visual rhythm suited to the publication.")})
@@ -869,10 +926,24 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article)
 	return limitPrompt(fmt.Sprintf("Create page 1 (%s), the cover of %q, a %s.\nSTYLE: %s\nCOVER STYLE: %s\nUse cover lines for: %s\nInclude masthead, issue date, price/barcode or equivalent furniture, strong hierarchy, and avoid: %s.", pageSide(1), title, magType, styleLine(style, "core"), style.Cover, articleTitles(articles, 6), style.Avoid), 3900)
 }
 
-func articlePrompt(n int, title string, style magazineStyle, kit creativeKit, kind string, a article) string {
+func articlePrompt(n int, title string, style magazineStyle, kit creativeKit, kind string, a article, part, totalParts int) string {
 	taskStyle := styleLine(style, kind)
 	modules := strings.Join(pickStrings(append(kit.Sidebars, kit.Captions...), n, 3), "; ")
-	return limitPrompt(fmt.Sprintf("Create page %d (%s) of %q as a %s page.\nSTYLE: %s\nPAGE STYLE: %s\nFOLIO: Put page number %d on the %s side in the footer.\nMODULE IDEAS: %s\nARTICLE: %s\nBODY: %s\nLayout with headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful.", n, pageSide(n), title, kind, styleLine(style, "content"), taskStyle, n, pageNumberSide(n), modules, a.Title, compact(a.Body, 1900)), 3900)
+	partText := ""
+	if totalParts > 1 {
+		partText = fmt.Sprintf("\nSERIES: This is page %d of %d for this item. Continue the same story/feature without repeating the same layout.", part, totalParts)
+	}
+	return limitPrompt(fmt.Sprintf("Create page %d (%s) of %q as a %s page.\nSTYLE: %s\nPAGE STYLE: %s\nFOLIO: Put page number %d on the %s side in the footer.%s\nMODULE IDEAS: %s\nTITLE: %s\nBRIEF/BODY: %s\nLayout with headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful.", n, pageSide(n), title, kind, styleLine(style, "content"), taskStyle, n, pageNumberSide(n), partText, modules, a.Title, compact(a.Body, 1900)), 3900)
+}
+
+func normalizedArticlePages(a article) int {
+	if a.Pages < 1 {
+		return 1
+	}
+	if a.Pages > 8 {
+		return 8
+	}
+	return a.Pages
 }
 
 func genericPrompt(n int, title string, style magazineStyle, kit creativeKit, kind, task string) string {
@@ -913,6 +984,11 @@ func cleanArticles(in []article) []article {
 	for _, a := range in {
 		a.Title = cleanText(a.Title)
 		a.Body = cleanText(a.Body)
+		a.Kind = strings.TrimSpace(a.Kind)
+		if a.Kind == "" {
+			a.Kind = "article"
+		}
+		a.Pages = normalizedArticlePages(a)
 		if a.Title == "" && a.Body == "" {
 			continue
 		}
@@ -1381,6 +1457,23 @@ func methodNotAllowed(w http.ResponseWriter) {
 	writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 }
 
+func contextWithAPIKey(ctx context.Context, apiKey string) context.Context {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, apiKeyContextKey{}, apiKey)
+}
+
+func commandEnv(ctx context.Context) []string {
+	env := os.Environ()
+	apiKey, _ := ctx.Value(apiKeyContextKey{}).(string)
+	if strings.TrimSpace(apiKey) != "" {
+		env = append(env, "DEFAPI_API_KEY="+strings.TrimSpace(apiKey))
+	}
+	return env
+}
+
 const (
 	pageWidth  = 1240
 	pageHeight = 1754
@@ -1463,17 +1556,18 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Magazine Builder</title>
 <style>
-:root{color-scheme:light;--ink:#172026;--muted:#667680;--line:#d9e0e5;--panel:#f6f8fa;--accent:#b3261e;--blue:#235789;--paper:#fffdf8;--soft:#edf2f5}*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink);background:linear-gradient(#eef3f6,#e4e9ed)}button,input,select,textarea{font:inherit}button{border:0;border-radius:6px;background:var(--ink);color:white;padding:10px 14px;font-weight:700;cursor:pointer}button.secondary{background:var(--blue)}button.ghost{background:white;color:var(--ink);border:1px solid var(--line)}button:disabled{opacity:.55;cursor:not-allowed}.spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.shell{max-width:1320px;margin:0 auto;padding:28px 22px 44px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.brand h1{font-size:34px;line-height:1.05;margin:0 0 7px}.brand p{margin:0;color:var(--muted);max-width:650px}.workspace{font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);background:white;border:1px solid var(--line);border-radius:6px;padding:8px 10px}.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.step-pill{border:1px solid var(--line);border-radius:8px;padding:11px 12px;background:white;color:var(--muted);font-weight:700}.step-pill.active{background:var(--ink);border-color:var(--ink);color:white}.wizard{background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 45px rgba(26,38,48,.08);overflow:hidden}.wizard-step{display:none;padding:24px}.wizard-step.active{display:block}.step-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:18px}.step-head h2{font-size:22px;margin:0 0 4px}.step-head p{margin:0;color:var(--muted);max-width:720px}.form-grid{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:16px}.field{margin-bottom:14px}label{display:block;font-weight:700;margin:0 0 6px}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:7px;background:white;padding:10px 11px;color:var(--ink)}textarea{min-height:132px;resize:vertical}.style-box textarea{min-height:230px}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.step-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.status{color:var(--muted);font-size:13px;margin:8px 0 0;min-height:18px}.muted{color:var(--muted);font-size:13px}.article-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.article-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-top:14px}.article{border:1px solid var(--line);background:white;border-radius:8px;padding:12px}.article textarea{min-height:120px}.hidden{display:none!important}.toolbar{display:flex;gap:8px;margin:18px 0 10px;flex-wrap:wrap}.toolbar button{flex:none}.results{margin-top:18px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px}.page{background:white;border:1px solid var(--line);border-radius:8px;padding:12px;min-height:220px}.page[draggable=true]{cursor:grab}.page.dragging{opacity:.45}.fixed{opacity:.72}.kind{font-size:12px;color:white;background:var(--accent);display:inline-block;border-radius:999px;padding:2px 8px;text-transform:uppercase}.page h3{margin:8px 0;font-size:18px}.prompt{white-space:pre-wrap;color:#26343c;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f8fafb;border:1px solid var(--line);border-radius:6px;padding:8px;max-height:220px;overflow:auto}.kit{white-space:pre-wrap;background:white;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:12px}.preview{width:100%;aspect-ratio:9/16;object-fit:cover;border:1px solid var(--line);border-radius:6px;background:#f5f7f8;margin:8px 0}.page-status{font-size:12px;color:var(--muted);margin:4px 0 8px}@media(max-width:760px){.shell{padding:18px 12px 32px}.hero{display:block}.brand h1{font-size:28px}.steps{grid-template-columns:1fr 1fr}.form-grid,.article-tools{grid-template-columns:1fr}.wizard-step{padding:16px}.step-head{display:block}.step-actions{justify-content:stretch}.step-actions button{flex:1}}
+:root{color-scheme:light;--ink:#172026;--muted:#667680;--line:#d9e0e5;--panel:#f6f8fa;--accent:#b3261e;--blue:#235789;--paper:#fffdf8;--soft:#edf2f5}*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink);background:linear-gradient(#eef3f6,#e4e9ed)}button,input,select,textarea{font:inherit}button{border:0;border-radius:6px;background:var(--ink);color:white;padding:10px 14px;font-weight:700;cursor:pointer}button.secondary{background:var(--blue)}button.ghost{background:white;color:var(--ink);border:1px solid var(--line)}button:disabled{opacity:.55;cursor:not-allowed}.spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.shell{max-width:1320px;margin:0 auto;padding:28px 22px 44px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.brand h1{font-size:34px;line-height:1.05;margin:0 0 7px}.brand p{margin:0;color:var(--muted);max-width:650px}.workspace{font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);background:white;border:1px solid var(--line);border-radius:6px;padding:8px 10px}.key-gate{position:fixed;inset:0;z-index:20;background:rgba(232,238,242,.96);display:flex;align-items:center;justify-content:center;padding:20px}.key-gate.hidden{display:none}.key-card{width:min(520px,100%);background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 70px rgba(26,38,48,.18);padding:22px}.key-card h2{margin:0 0 8px;font-size:24px}.key-card p{color:var(--muted);margin:0 0 16px}.key-actions{display:flex;gap:10px;margin-top:14px}.key-actions button{flex:1}.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.step-pill{border:1px solid var(--line);border-radius:8px;padding:11px 12px;background:white;color:var(--muted);font-weight:700}.step-pill.active{background:var(--ink);border-color:var(--ink);color:white}.wizard{background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 45px rgba(26,38,48,.08);overflow:hidden}.wizard-step{display:none;padding:24px}.wizard-step.active{display:block}.step-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:18px}.step-head h2{font-size:22px;margin:0 0 4px}.step-head p{margin:0;color:var(--muted);max-width:720px}.form-grid{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:16px}.field{margin-bottom:14px}label{display:block;font-weight:700;margin:0 0 6px}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:7px;background:white;padding:10px 11px;color:var(--ink)}textarea{min-height:132px;resize:vertical}.style-box textarea{min-height:230px}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.step-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.status{color:var(--muted);font-size:13px;margin:8px 0 0;min-height:18px}.muted{color:var(--muted);font-size:13px}.article-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.article-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-top:14px}.article{border:1px solid var(--line);background:white;border-radius:8px;padding:12px}.article textarea{min-height:120px}.hidden{display:none!important}.toolbar{display:flex;gap:8px;margin:18px 0 10px;flex-wrap:wrap}.toolbar button{flex:none}.results{margin-top:18px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px}.page{background:white;border:1px solid var(--line);border-radius:8px;padding:12px;min-height:220px}.page[draggable=true]{cursor:grab}.page.dragging{opacity:.45}.fixed{opacity:.72}.kind{font-size:12px;color:white;background:var(--accent);display:inline-block;border-radius:999px;padding:2px 8px;text-transform:uppercase}.page h3{margin:8px 0;font-size:18px}.prompt{width:100%;min-height:180px;color:#26343c;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f8fafb;border:1px solid var(--line);border-radius:6px;padding:8px;resize:vertical}.template-preview{display:grid;grid-template-columns:minmax(220px,320px) 1fr;gap:14px;align-items:start;background:white;border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px 0}.template-preview img{width:100%;aspect-ratio:9/16;object-fit:cover;border:1px solid var(--line);border-radius:6px}.template-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.kit{white-space:pre-wrap;background:white;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:12px}.preview{width:100%;aspect-ratio:9/16;object-fit:cover;border:1px solid var(--line);border-radius:6px;background:#f5f7f8;margin:8px 0}.page-status{font-size:12px;color:var(--muted);margin:4px 0 8px}@media(max-width:760px){.shell{padding:18px 12px 32px}.hero{display:block}.brand h1{font-size:28px}.steps{grid-template-columns:1fr 1fr}.form-grid,.article-tools{grid-template-columns:1fr}.wizard-step{padding:16px}.step-head{display:block}.step-actions{justify-content:stretch}.step-actions button{flex:1}}
 </style>
 </head>
 <body>
+<div id="keyGate" class="key-gate hidden"><div class="key-card"><h2>DEFAPI key required</h2><p>Your key is stored only in this browser via localStorage and sent to this local server for textgen/imagegen calls.</p><label>DEFAPI API key</label><input id="apiKeyInput" type="password" autocomplete="off" placeholder="defapi..."><div class="key-actions"><button id="saveApiKey" class="secondary">Save and Start</button></div><div id="apiKeyStatus" class="status"></div></div></div>
 <div class="shell">
 <header class="hero">
   <div class="brand">
     <h1>Magazine Builder</h1>
     <p>Create a publication style, gather articles, generate a page plan, reorder the issue, then render images and a PDF.</p>
   </div>
-  <div id="workspaceLabel" class="workspace">No workspace yet</div>
+  <div id="workspaceLabel" class="workspace">No workspace yet</div><button id="changeApiKey" class="ghost">API key</button>
 </header>
 <nav class="steps" aria-label="Wizard steps">
   <div class="step-pill active" data-step-label="1">1. Style</div>
@@ -1500,7 +1594,7 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
   <div id="wizardArticles" class="wizard-step">
     <div class="step-head"><div><h2>Add article material</h2><p>Import a feed or write articles manually. Imported and manual articles are rewritten into the publication voice before planning.</p></div></div>
     <div class="article-tools"><div><label>RSS or Atom feed URL</label><input id="rss" placeholder="https://example.com/feed.xml"><div id="rssStatus" class="status"></div></div><button id="importRSS">Import latest</button></div>
-    <div class="toolbar"><button id="generateArticles" class="secondary">Generate Articles</button><button id="addArticle" class="ghost">Add Manual Article</button></div><div id="generateStatus" class="status"></div>
+    <div class="toolbar"><button id="generateArticles" class="secondary">Generate Articles</button><button id="addArticle" class="ghost">Add Article</button><button id="addFeature" class="ghost">Add Feature Page</button></div><div id="generateStatus" class="status"></div>
     <div id="articles" class="article-list"></div>
     <p class="muted">Manual article text can be rough. It is cleaned and rewritten with textgen when the plan is generated.</p>
     <div class="step-actions"><button class="ghost" id="backStyle">Back</button><button id="toPlan">Generate Plan</button></div>
@@ -1511,25 +1605,28 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
   </div>
   <div id="wizardPdf" class="wizard-step">
     <div class="step-head"><div><h2>Render the issue</h2><p>The app renders the cover, creates a shared content template image, renders the pages, then writes the PDF.</p></div></div>
-    <div id="renderToolbar" class="toolbar hidden"><button id="render" class="secondary">Render Images + PDF</button><button id="downloadPdfJson" class="ghost">Download JSON</button></div><div id="renderStatus" class="status"></div><section id="renderOutput" class="results"></section><div class="step-actions"><button class="ghost" id="backPlan">Back</button><button id="renderSide" class="secondary">Render Images + PDF</button></div>
+    <div id="renderToolbar" class="toolbar hidden"><button id="render" class="secondary">Download PDF</button><button id="downloadPdfJson" class="ghost">Download JSON</button></div><div id="renderStatus" class="status"></div><div id="templateReview"></div><section id="renderOutput" class="results"></section><div class="step-actions"><button class="ghost" id="backPlan">Back</button><button id="renderSide" class="secondary">Download PDF</button></div>
   </div>
 </section>
 
 </div>
 <script>
-let articles=[];let lastPlan=null;let referencePath='';let workspace='';let renderedImages={};let draggedIndex=null;let currentStep=1;let busyCount=0;let isRendering=false;
+let articles=[];let lastPlan=null;let referencePath='';let workspace='';let apiKey=localStorage.getItem('defapiApiKey')||'';let renderedImages={};let renderedTemplate=null;let draggedIndex=null;let currentStep=1;let busyCount=0;let isRendering=false;
 const $=id=>document.getElementById(id);
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function lockButtons(on){document.body.classList.toggle('busy',on);document.querySelectorAll('button').forEach(b=>{if(on){b.dataset.wasDisabled=b.disabled?'1':'0';b.disabled=true}else{b.disabled=b.dataset.wasDisabled==='1';delete b.dataset.wasDisabled}})}
 async function withBusy(button,msg,fn){if(busyCount>0)return;busyCount++;const old=button?button.innerHTML:'';lockButtons(true);if(button)button.innerHTML='<span class="spinner"></span>'+esc(msg||'Working...');try{return await fn()}finally{if(button)button.innerHTML=old;busyCount--;lockButtons(false)}}
+function requireApiKey(){if(!apiKey){$('keyGate').classList.remove('hidden');return false}$('keyGate').classList.add('hidden');return true}
+function saveApiKey(){const v=$('apiKeyInput').value.trim();if(!v){$('apiKeyStatus').textContent='Enter an API key.';return}apiKey=v;localStorage.setItem('defapiApiKey',apiKey);$('apiKeyInput').value='';$('keyGate').classList.add('hidden')}
+$('saveApiKey').onclick=saveApiKey;$('changeApiKey').onclick=()=>{$('apiKeyInput').value=apiKey;$('keyGate').classList.remove('hidden')};
 function updateWorkspaceLabel(){const el=$('workspaceLabel');if(el)el.innerHTML=workspace?'Workspace: '+esc(workspace)+' · <a href="/work/'+esc(workspace)+'/magazine.log" target="_blank">log</a>':'No workspace yet'}
 function showStep(n){updateWorkspaceLabel();currentStep=n;const pt=$('planToolbar');if(pt)pt.classList.toggle('hidden',n!==3||!lastPlan);const rt=$('renderToolbar');if(rt)rt.classList.toggle('hidden',n!==4||!lastPlan);document.querySelectorAll('.step-pill').forEach(el=>el.classList.toggle('active',+el.dataset.stepLabel===n));[['wizardStyle',1],['wizardArticles',2],['wizardPlan',3],['wizardPdf',4]].forEach(([id,step])=>$(id).classList.toggle('active',step===n));if(n>=3&&lastPlan)renderPlan(lastPlan)}
-async function ensureStyle(){if($('style').value.trim().startsWith('{'))return true;$('styleStatus').textContent='Enhancing style JSON...';return await enhanceStyle()}
-async function enhanceStyle(){const fd=new FormData();fd.append('title',$('title').value);fd.append('style',$('style').value);fd.append('workspace',workspace);if($('reference').files[0])fd.append('reference',$('reference').files[0]);const res=await fetch('/api/enhance-style',{method:'POST',body:fd});const data=await res.json();if(!res.ok){$('styleStatus').textContent=data.error||'Failed';return false}$('style').value=data.enhancedStyle;referencePath=data.referencePath||referencePath;workspace=data.workspace||workspace;updateWorkspaceLabel();$('styleStatus').textContent=referencePath?'Enhanced with reference image.':'Enhanced.';return true}
+async function ensureStyle(){if(!requireApiKey())return false;if($('style').value.trim().startsWith('{'))return true;$('styleStatus').textContent='Enhancing style JSON...';return await enhanceStyle()}
+async function enhanceStyle(){const fd=new FormData();fd.append('apiKey',apiKey);fd.append('title',$('title').value);fd.append('style',$('style').value);fd.append('workspace',workspace);if($('reference').files[0])fd.append('reference',$('reference').files[0]);const res=await fetch('/api/enhance-style',{method:'POST',body:fd});const data=await res.json();if(!res.ok){$('styleStatus').textContent=data.error||'Failed';return false}$('style').value=data.enhancedStyle;referencePath=data.referencePath||referencePath;workspace=data.workspace||workspace;updateWorkspaceLabel();$('styleStatus').textContent=referencePath?'Enhanced with reference image.':'Enhanced.';return true}
 function renderArticles(){
   const wrap=$('articles');wrap.innerHTML='';
-  articles.forEach((a,i)=>{const div=document.createElement('div');div.className='article';div.innerHTML='<label>Title</label><input value="'+esc(a.title||'')+'" data-i="'+i+'" data-k="title"><label>Body</label><textarea data-i="'+i+'" data-k="body">'+esc(a.body||'')+'</textarea><label>Image URLs, one per line</label><textarea data-i="'+i+'" data-k="images">'+esc((a.images||[]).join('\n'))+'</textarea><button class="ghost" data-remove="'+i+'">Remove</button>';wrap.appendChild(div)});
-  wrap.querySelectorAll('input,textarea').forEach(el=>el.oninput=e=>{const i=+e.target.dataset.i,k=e.target.dataset.k;articles[i][k]=k==='images'?e.target.value.split('\n').map(s=>s.trim()).filter(Boolean):e.target.value;articles[i].enhanced=false});
+  articles.forEach((a,i)=>{const div=document.createElement('div');div.className='article';const kind=a.kind||'article';div.innerHTML='<div class="row"><div><label>Type</label><select data-i="'+i+'" data-k="kind"><option value="article" '+(kind==='article'?'selected':'')+'>Article</option><option value="feature" '+(kind==='feature'?'selected':'')+'>Feature page</option></select></div><div><label>Pages</label><input type="number" min="1" max="8" value="'+esc(a.pages||1)+'" data-i="'+i+'" data-k="pages"></div></div><label>Title</label><input value="'+esc(a.title||'')+'" data-i="'+i+'" data-k="title"><label>'+(kind==='feature'?'Feature description':'Body')+'</label><textarea data-i="'+i+'" data-k="body">'+esc(a.body||'')+'</textarea><label>Image URLs, one per line</label><textarea data-i="'+i+'" data-k="images">'+esc((a.images||[]).join('\n'))+'</textarea><button class="ghost" data-remove="'+i+'">Remove</button>';wrap.appendChild(div)});
+  wrap.querySelectorAll('input,textarea,select').forEach(el=>{const update=e=>{const i=+e.target.dataset.i,k=e.target.dataset.k;articles[i][k]=k==='images'?e.target.value.split('\n').map(s=>s.trim()).filter(Boolean):(k==='pages'?Math.max(1,Math.min(8,parseInt(e.target.value||'1',10))):e.target.value);articles[i].enhanced=false;if(k==='kind')renderArticles()};el.oninput=update;el.onchange=update});
   wrap.querySelectorAll('[data-remove]').forEach(el=>el.onclick=e=>{if(isRendering)return;articles.splice(+e.target.dataset.remove,1);renderArticles()})
 }
 $('toArticles').onclick=e=>withBusy(e.currentTarget,'Preparing...',async()=>{if(await ensureStyle())showStep(2)});
@@ -1537,33 +1634,42 @@ $('backStyle').onclick=()=>{if(!isRendering)showStep(1)};
 $('backArticles').onclick=()=>{if(!isRendering)showStep(2)};
 $('backPlan').onclick=()=>{if(!isRendering)showStep(3)};
 $('toPlan').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{await buildPlan();if(lastPlan)showStep(3)});
-$('toPdf').onclick=e=>withBusy(e.currentTarget,'Rendering...',()=>renderAll());
-$('addArticle').onclick=()=>{if(isRendering)return;articles.push({title:'',body:'',images:[],enhanced:false});renderArticles()};
+$('toPdf').onclick=e=>withBusy(e.currentTarget,'Preparing...',()=>startRenderFlow());
+$('addArticle').onclick=()=>{if(isRendering)return;articles.push({kind:'article',title:'',body:'',images:[],pages:1,enhanced:false});renderArticles()};
+$('addFeature').onclick=()=>{if(isRendering)return;articles.push({kind:'feature',title:'',body:'Describe this feature page: comments, crossword, quiz, listings, letters, classifieds, TV program, calendar, chart, etc.',images:[],pages:1,enhanced:false});renderArticles()};
 $('clear').onclick=()=>{if(isRendering)return;$('style').value='';$('reference').value='';referencePath='';workspace='';$('styleStatus').textContent=''};
-$('generateArticles').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{if(!await ensureStyle())return;$('generateStatus').textContent='Writing articles for this publication...';const res=await fetch('/api/generate-articles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,style:$('style').value,count:4,workspace})});const data=await res.json();if(!res.ok){$('generateStatus').textContent=data.error||'Failed';return}workspace=data.workspace||workspace;updateWorkspaceLabel();articles=articles.concat(data.articles||[]);renderArticles();$('generateStatus').textContent='Generated '+(data.articles||[]).length+' articles.'});
-$('importRSS').onclick=e=>withBusy(e.currentTarget,'Importing...',async()=>{if(!await ensureStyle())return;$('rssStatus').textContent='Fetching articles, extracting pages and rewriting...';const res=await fetch('/api/import-rss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:$('rss').value,limit:10,style:$('style').value,workspace})});const data=await res.json();if(!res.ok){$('rssStatus').textContent=data.error||'Failed';return}workspace=data.workspace||workspace;updateWorkspaceLabel();articles=articles.concat(data.articles||[]);renderArticles();$('rssStatus').textContent='Imported '+(data.articles||[]).length+' rewritten articles.'});
-async function buildPlan(){if(!await ensureStyle())return;const payload={title:$('title').value,magazineType:'',style:$('style').value,pageCount:+$('pageCount').value,articles,workspace};const out=$('output');out.innerHTML='<div class="kit">Rewriting manual articles and generating plan...</div>';renderedImages={};const res=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await res.json();if(!res.ok){out.innerHTML='<div class="kit">'+esc(data.error||'Failed')+'</div>';return}lastPlan=data;workspace=data.workspace||workspace;updateWorkspaceLabel();lastPlan.reference=referencePath;articles=(data.pages||[]).filter(p=>p.article).map(p=>p.article);renderArticles();renderPlan(data)}
+$('generateArticles').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{if(!await ensureStyle())return;$('generateStatus').textContent='Writing articles for this publication...';const res=await fetch('/api/generate-articles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,style:$('style').value,count:4,workspace,apiKey})});const data=await res.json();if(!res.ok){$('generateStatus').textContent=data.error||'Failed';return}workspace=data.workspace||workspace;updateWorkspaceLabel();articles=articles.concat((data.articles||[]).map(a=>Object.assign({kind:'article',pages:1},a)));renderArticles();$('generateStatus').textContent='Generated '+(data.articles||[]).length+' articles.'});
+$('importRSS').onclick=e=>withBusy(e.currentTarget,'Importing...',async()=>{if(!await ensureStyle())return;$('rssStatus').textContent='Fetching articles, extracting pages and rewriting...';const res=await fetch('/api/import-rss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:$('rss').value,limit:10,style:$('style').value,workspace,apiKey})});const data=await res.json();if(!res.ok){$('rssStatus').textContent=data.error||'Failed';return}workspace=data.workspace||workspace;updateWorkspaceLabel();articles=articles.concat((data.articles||[]).map(a=>Object.assign({kind:'article',pages:1},a)));renderArticles();$('rssStatus').textContent='Imported '+(data.articles||[]).length+' rewritten articles.'});
+async function buildPlan(){if(!await ensureStyle())return;const payload={title:$('title').value,magazineType:'',style:$('style').value,pageCount:+$('pageCount').value,articles,workspace,apiKey};const out=$('output');out.innerHTML='<div class="kit">Rewriting manual articles and generating plan...</div>';renderedImages={};const res=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await res.json();if(!res.ok){out.innerHTML='<div class="kit">'+esc(data.error||'Failed')+'</div>';return}lastPlan=data;workspace=data.workspace||workspace;updateWorkspaceLabel();lastPlan.reference=referencePath;articles=uniquePlannedArticles(data.pages||[]);renderArticles();renderPlan(data)}
 $('build').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{await buildPlan();if(lastPlan)showStep(3)});
 $('download').onclick=()=>{if(!lastPlan||isRendering)return;const blob=new Blob([JSON.stringify(lastPlan,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='magazine-plan.json';a.click();URL.revokeObjectURL(a.href)};
-$('render').onclick=e=>withBusy(e.currentTarget,'Rendering...',()=>renderAll());$('renderSide').onclick=e=>withBusy(e.currentTarget,'Rendering...',()=>renderAll());$('downloadPdfJson').onclick=()=>$('download').click();
+$('render').onclick=e=>withBusy(e.currentTarget,'Preparing...',()=>startRenderFlow());$('renderSide').onclick=e=>withBusy(e.currentTarget,'Preparing...',()=>startRenderFlow());$('downloadPdfJson').onclick=()=>$('download').click();
 function renderPlan(data){
   const kit=typeof data.creativeKit==='string'?data.creativeKit:JSON.stringify(data.creativeKit,null,2);
-  const pages=(data.pages||[]).map((p,i)=>pageHTML(p,i)).join('');
+  let pageItems=(data.pages||[]).map((p,i)=>pageHTML(p,i));if(currentStep===4&&pageItems.length>1)pageItems.splice(1,0,templateCardHTML());const pages=pageItems.join('');
   const target=(currentStep===4&&$('renderOutput'))?$('renderOutput'):$('output');
   if(!target)return;
   target.innerHTML='<div class="kit"><strong>Style JSON</strong>\n'+esc(JSON.stringify(data.style||{},null,2))+'\n\n<strong>Creative kit</strong>\n'+esc(kit)+'</div><div id="pageGrid" class="grid">'+pages+'</div>';
+  wirePromptEditors();
+  wireTemplateActions();
   wireDrag();
 }
-function pageHTML(p,i){const fixed=i===0||i===(lastPlan.pages.length-1);const item=renderedImages[p.number]||null;const img=item?item.image:'';const canDrag=!fixed&&!isRendering;return '<article class="page '+(fixed?'fixed':'')+'" data-i="'+i+'" draggable="'+canDrag+'"><span class="kind">'+esc(p.kind)+'</span><h3>'+p.number+'. '+esc(p.title)+'</h3><div class="page-status" id="status-'+p.number+'">'+(img?'Rendered':(fixed?'Fixed page':(isRendering?'Render locked':'Drag to reorder')))+'</div>'+(img?'<img class="preview" src="'+esc(img)+'">':'<div class="preview"></div>')+'<div class="prompt">'+esc(p.prompt)+'</div></article>'}
+function pageHTML(p,i){const fixed=i===0||i===(lastPlan.pages.length-1);const item=renderedImages[p.number]||null;const img=item?item.image:'';const canDrag=!fixed&&!isRendering;return '<article class="page '+(fixed?'fixed':'')+'" data-i="'+i+'" draggable="'+canDrag+'"><span class="kind">'+esc(p.kind)+'</span><h3>'+p.number+'. '+esc(p.title)+'</h3><div class="page-status" id="status-'+p.number+'">'+(img?'Rendered':(fixed?'Fixed page':(isRendering?'Render locked':'Drag to reorder')))+'</div>'+(img?'<img class="preview" src="'+esc(img)+'">':'<div class="preview"></div>')+'<label>Image prompt</label><textarea class="prompt" data-prompt-i="'+i+'">'+esc(p.prompt)+'</textarea></article>'}
+function templateCardHTML(){const ready=renderedTemplate&&renderedTemplate.publicUrl;const img=renderedTemplate&&renderedTemplate.image?'<img class="preview" src="'+esc(renderedTemplate.image)+'">':'<div class="preview"></div>';const status=ready?'Review before rendering content pages':'Template will appear here before content pages render';return '<article class="page fixed"><span class="kind">template</span><h3>2. Content template</h3><div class="page-status">'+status+'</div>'+img+'<div class="template-actions"><button id="templateUse" class="secondary" '+(ready?'':'disabled')+'>✓ Use</button><button id="templateRefresh" class="ghost" '+(ready?'':'disabled')+'>↻ Refresh</button></div></article>'}
+function wireTemplateActions(){const use=$('templateUse');if(use)use.onclick=e=>{if(renderedTemplate&&renderedTemplate.publicUrl)withBusy(e.currentTarget,'Rendering...',()=>renderRemainingPages(renderedTemplate.publicUrl))};const refresh=$('templateRefresh');if(refresh)refresh.onclick=e=>{if(renderedTemplate)withBusy(e.currentTarget,'Regenerating...',()=>renderTemplateForReview())}}
+function wirePromptEditors(){document.querySelectorAll('[data-prompt-i]').forEach(el=>el.oninput=e=>{const i=+e.target.dataset.promptI;if(lastPlan&&lastPlan.pages[i])lastPlan.pages[i].prompt=e.target.value})}
+function uniquePlannedArticles(pages){const seen=new Set();const out=[];(pages||[]).forEach(p=>{if(!p.article)return;const key=[p.article.kind||'article',p.article.title||'',p.article.body||'',p.article.source||''].join('\u001f');if(seen.has(key))return;seen.add(key);out.push(Object.assign({kind:'article',pages:1},p.article))});return out}
 function wireDrag(){if(isRendering)return;document.querySelectorAll('.page[draggable=true]').forEach(card=>{card.ondragstart=e=>{draggedIndex=+card.dataset.i;card.classList.add('dragging')};card.ondragend=e=>card.classList.remove('dragging');card.ondragover=e=>e.preventDefault();card.ondrop=e=>{e.preventDefault();const target=+card.dataset.i;if(draggedIndex===null||target===0||target===lastPlan.pages.length-1||isRendering)return;movePage(draggedIndex,target)}})}
 function movePage(from,to){const pages=lastPlan.pages;if(isRendering||from===0||from===pages.length-1||to===0||to===pages.length-1)return;const [p]=pages.splice(from,1);pages.splice(to,0,p);renumberPages();renderPlan(lastPlan)}
 function renumberPages(){lastPlan.pages.forEach((p,i)=>{const old=p.number;p.number=i+1;p.prompt=renumberPrompt(p.prompt,old,p.number)})}
 function renumberPrompt(prompt,oldNo,newNo){let s=String(prompt);s=s.replace(new RegExp('page '+oldNo,'gi'),'page '+newNo);s=s.replace(new RegExp('Page '+oldNo,'g'),'Page '+newNo);s=s.replace(new RegExp('side '+oldNo,'gi'),'side '+newNo);s=s.replace(new RegExp('number '+oldNo,'gi'),'number '+newNo);return s}
-async function renderAll(){if(!lastPlan){$('renderStatus').textContent='Generate a plan first.';return}isRendering=true;showStep(4);renderedImages={};renderPlan(lastPlan);try{$('renderStatus').textContent='Rendering cover...';let cover=await renderPage(lastPlan.pages[0], '');renderedImages[1]=cover;renderPlan(lastPlan);$('renderStatus').textContent='Rendering shared content template...';let template=await renderTemplate();let templateRef=template.publicUrl||'';if(!templateRef){$('renderStatus').textContent='Template rendered, but imagegen did not return a public Image URL. Check workspace log.';return}$('renderStatus').textContent='Rendering content pages...';const middle=lastPlan.pages.slice(1);for(let i=0;i<middle.length;i+=3){await Promise.all(middle.slice(i,i+3).map(async p=>{const img=await renderPage(p, templateRef);renderedImages[p.number]=img;renderPlan(lastPlan)}))}const ordered=lastPlan.pages.map(p=>renderedImages[p.number]&&renderedImages[p.number].image).filter(Boolean);$('renderStatus').textContent='Writing PDF...';const res=await fetch('/api/write-pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,images:ordered,workspace})});const data=await res.json();if(!res.ok){$('renderStatus').textContent=data.error||'PDF failed';return}$('renderStatus').innerHTML='Done. <a href="'+esc(data.pdf)+'" target="_blank">Open PDF</a>'}finally{isRendering=false;renderPlan(lastPlan)}}
-async function renderTemplate(){const res=await fetch('/api/render-template',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:lastPlan.style,reference:referencePath,workspace})});const data=await res.json();if(!res.ok)throw new Error(data.error||'template failed');return {image:data.image,publicUrl:data.publicUrl||''}}
-async function renderPage(page,styleReference){setStatus(page.number,'Rendering...');const ref=page.number===1?referencePath:'';const res=await fetch('/api/render-page',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page,styleReference,reference:ref,workspace})});const data=await res.json();if(!res.ok){setStatus(page.number,data.error||'Failed');throw new Error(data.error||'render failed')}setStatus(page.number,'Rendered');return {image:data.image,publicUrl:data.publicUrl||''}}
+async function startRenderFlow(){if(!lastPlan){$('renderStatus').textContent='Generate a plan first.';return}isRendering=true;showStep(4);renderedImages={};renderedTemplate=null;$('templateReview').innerHTML='';renderPlan(lastPlan);try{$('renderStatus').textContent='Rendering cover...';let cover=await renderPage(lastPlan.pages[0], '');renderedImages[1]=cover;renderPlan(lastPlan);await renderTemplateForReview()}catch(e){$('renderStatus').textContent=e.message||'Render failed';isRendering=false;renderPlan(lastPlan)}}
+async function renderTemplateForReview(){ $('renderStatus').textContent='Rendering shared content template...';const template=await renderTemplate();renderedTemplate=template;const templateRef=template.publicUrl||'';if(!templateRef){$('renderStatus').textContent='Template rendered, but imagegen did not return a public Image URL. Check workspace log.';isRendering=false;renderPlan(lastPlan);return}$('renderStatus').textContent='Review the template card beside the cover before rendering content pages.';$('templateReview').innerHTML='<p class="muted">Use ✓ or refresh ↻ on the template card.</p>';renderPlan(lastPlan)}
+async function renderRemainingPages(templateRef){try{$('templateReview').innerHTML='';renderedTemplate=null;$('renderStatus').textContent='Rendering content pages...';const middle=lastPlan.pages.slice(1);for(let i=0;i<middle.length;i+=3){await Promise.all(middle.slice(i,i+3).map(async p=>{const img=await renderPage(p, templateRef);renderedImages[p.number]=img;renderPlan(lastPlan)}))}const ordered=lastPlan.pages.map(p=>renderedImages[p.number]&&renderedImages[p.number].image).filter(Boolean);$('renderStatus').textContent='Writing PDF...';const res=await fetch('/api/write-pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,images:ordered,workspace})});const data=await res.json();if(!res.ok){$('renderStatus').textContent=data.error||'PDF failed';return}$('renderStatus').innerHTML='Done. Download should start automatically. <a href="'+esc(data.pdf)+'" target="_blank">Open PDF</a>';const a=document.createElement('a');a.href=data.pdf;a.download='';document.body.appendChild(a);a.click();a.remove()}finally{isRendering=false;renderPlan(lastPlan)}}
+async function renderTemplate(){const res=await fetch('/api/render-template',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:lastPlan.style,reference:referencePath,workspace,apiKey})});const data=await res.json();if(!res.ok)throw new Error(data.error||'template failed');return {image:data.image,publicUrl:data.publicUrl||''}}
+async function renderPage(page,styleReference){setStatus(page.number,'Rendering...');const ref=page.number===1?referencePath:'';const res=await fetch('/api/render-page',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page,styleReference,reference:ref,workspace,apiKey})});const data=await res.json();if(!res.ok){setStatus(page.number,data.error||'Failed');throw new Error(data.error||'render failed')}setStatus(page.number,'Rendered');return {image:data.image,publicUrl:data.publicUrl||''}}
 function setStatus(n,msg){const el=$('status-'+n);if(el)el.textContent=msg}
-renderArticles();updateWorkspaceLabel();showStep(1);
+renderArticles();updateWorkspaceLabel();showStep(1);requireApiKey();
 </script>
 </body>
 </html>`))
