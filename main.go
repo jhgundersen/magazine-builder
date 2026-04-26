@@ -167,6 +167,7 @@ type templateRequest struct {
 	Reference string        `json:"reference"`
 	Workspace string        `json:"workspace"`
 	APIKey    string        `json:"apiKey"`
+	Prompt    string        `json:"prompt"`
 }
 
 type pdfRequest struct {
@@ -235,7 +236,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.ImagegenModel, "imagegen-model", "gpt2", "imagegen model subcommand")
 	flag.DurationVar(&cfg.ImagegenTimeout, "imagegen-timeout", 20*time.Minute, "imagegen timeout per page")
 	flag.StringVar(&cfg.ImagegenFormat, "imagegen-format", "jpeg", "imagegen output format")
-	flag.StringVar(&cfg.ImagegenSize, "imagegen-size", "9:16", "imagegen output size")
+	flag.StringVar(&cfg.ImagegenSize, "imagegen-size", "auto", "imagegen output size")
 	flag.StringVar(&cfg.ImagegenQuality, "imagegen-quality", "high", "imagegen output quality")
 	flag.StringVar(&cfg.ImagegenBackground, "imagegen-background", "opaque", "imagegen background")
 	flag.IntVar(&cfg.ImagegenMaxPromptChars, "imagegen-max-prompt-chars", 4000, "maximum imagegen prompt length")
@@ -414,7 +415,11 @@ func (s *server) handleRenderTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := contextWithAPIKey(r.Context(), req.APIKey)
-	prompt := limitPrompt(fmt.Sprintf("Create one completely text-free magazine page layout template.\nSTYLE: %s\nTEMPLATE: %s\nShow only generic layout geometry: paper texture, margins, column rhythm, blank header band, blank footer band, empty image rectangles, pale rule lines and subtle placeholder blocks. Absolutely no readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no registration marks, no printing press technical marks, no UI and no moodboard. It should be a calm blank layout reference for later pages.", styleLine(req.Style, "template"), req.Style.Template), s.cfg.ImagegenMaxPromptChars)
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		prompt = defaultTemplatePrompt(req.Style)
+	}
+	prompt = limitPrompt(prompt, s.cfg.ImagegenMaxPromptChars)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Style.Name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -602,8 +607,8 @@ func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath s
 }
 
 func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, style magazineStyle) (creativeKit, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, captions, backPage. Each value is an array of 5-8 short strings. Prepare reusable generic page elements for a %s called %q. Match this style: %s. Vary advert ideas and article modules. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), articleList(req.Articles))
-	text, err := s.runTextgen(ctx, prompt, 1200)
+	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, captions, backPage. Make departments, sidebars and captions arrays of 18-24 unique short strings each. Make adverts and backPage arrays of 10-16 unique short strings each. Every string must describe one specific reusable page element, never a duplicate or near-duplicate. Prepare issue-wide generic page elements for a %s called %q. Match this style: %s. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), articleList(req.Articles))
+	text, err := s.runTextgen(ctx, prompt, 1800)
 	if err != nil {
 		return creativeKit{}, err
 	}
@@ -746,7 +751,11 @@ func (s *server) tweakTemplatePrompt(ctx context.Context, prompt string, failure
 }
 
 func safeTemplatePrompt() string {
-	return "Create one completely text-free blank magazine layout page. Use only generic visual shapes: margins, a blank top band, a blank bottom band, a two-column grid, pale empty image rectangles, soft grey text-block shapes without letters, and subtle paper texture. No readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no diagrams, no UI, no technical print marks. Calm editorial layout reference only."
+	return "Create one completely text-free blank magazine layout page. Portrait page, aspect ratio 1240:1754, full page visible, no crop. Use only generic visual shapes: margins, a blank top band, a blank bottom band, a two-column grid, pale empty image rectangles, soft grey text-block shapes without letters, and subtle paper texture. No readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no diagrams, no UI, no technical print marks. Calm editorial layout reference only."
+}
+
+func defaultTemplatePrompt(style magazineStyle) string {
+	return fmt.Sprintf("Create one completely text-free magazine page layout template.\n%s\nSTYLE: %s\nTEMPLATE: %s\nShow only generic layout geometry: paper texture, margins, column rhythm, blank header band, blank footer band, empty image rectangles, pale rule lines and subtle placeholder blocks. Absolutely no readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no registration marks, no printing press technical marks, no UI and no moodboard. It should be a calm blank layout reference for later pages.", pageFormatInstruction(), styleLine(style, "template"), style.Template)
 }
 
 func (s *server) runImagegen(ctx context.Context, workspace string, pageNumber int, prompt string, images []string) (generatedImage, error) {
@@ -887,16 +896,17 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []page
 	pages := make([]pagePlan, 0, req.PageCount)
 	title := emptyDefault(req.Title, "Untitled Magazine")
 	magType := emptyDefault(req.MagazineType, "magazine")
+	modules := newModulePlanner(kit)
 	pages = append(pages, pagePlan{Number: 1, Kind: "cover", Title: "Cover", Prompt: coverPrompt(title, magType, style, req.Articles)})
 	itemIndex := 0
 	itemPart := 0
 	for n := 2; n <= req.PageCount; n++ {
 		if n == req.PageCount {
-			pages = append(pages, pagePlan{Number: n, Kind: "back-page", Title: "Back page", Prompt: genericPrompt(n, title, style, kit, "back", "Create a strong back page: advert, subscription panel, teaser, index, or closing visual depending on the publication style.")})
+			pages = append(pages, pagePlan{Number: n, Kind: "back-page", Title: "Back page", Prompt: genericPrompt(n, title, style, modules.next("back", 4, n), "back", "Create a strong back page: advert, subscription panel, teaser, index, or closing visual depending on the publication style.")})
 			continue
 		}
 		if isAdvertPage(n, req.PageCount) {
-			pages = append(pages, pagePlan{Number: n, Kind: "advert", Title: "Advert", Prompt: genericPrompt(n, title, style, kit, "advert", "Create a full-page fictional advert that belongs naturally in this publication. Use no real brands unless supplied by the article content.")})
+			pages = append(pages, pagePlan{Number: n, Kind: "advert", Title: "Advert", Prompt: genericPrompt(n, title, style, modules.next("advert", 4, n), "advert", "Create a full-page fictional advert that belongs naturally in this publication. Use no real brands unless supplied by the article content.")})
 			continue
 		}
 		if itemIndex < len(req.Articles) {
@@ -910,30 +920,29 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []page
 			if kind != "feature" && len([]rune(a.Body)) > 1800 {
 				kind = "feature"
 			}
-			pages = append(pages, pagePlan{Number: n, Kind: kind, Title: a.Title, Article: &a, Images: a.Images, Prompt: articlePrompt(n, title, style, kit, kind, a, itemPart, totalParts)})
+			pages = append(pages, pagePlan{Number: n, Kind: kind, Title: a.Title, Article: &a, Images: a.Images, Prompt: articlePrompt(n, title, style, modules.next(kind, 3, n), kind, a, itemPart, totalParts)})
 			if itemPart >= totalParts {
 				itemIndex++
 				itemPart = 0
 			}
 			continue
 		}
-		pages = append(pages, pagePlan{Number: n, Kind: "filler", Title: "Departments", Prompt: genericPrompt(n, title, style, kit, "filler", "Create a department/filler page with short recurring modules, briefs, reader notes, charts, sidebars, small adverts, captions, and visual rhythm suited to the publication.")})
+		pages = append(pages, pagePlan{Number: n, Kind: "filler", Title: "Departments", Prompt: genericPrompt(n, title, style, modules.next("filler", 4, n), "filler", "Create a department/filler page with short recurring modules, briefs, reader notes, charts, sidebars, small adverts, captions, and visual rhythm suited to the publication.")})
 	}
 	return pages
 }
 
 func coverPrompt(title, magType string, style magazineStyle, articles []article) string {
-	return limitPrompt(fmt.Sprintf("Create page 1 (%s), the cover of %q, a %s.\nSTYLE: %s\nCOVER STYLE: %s\nUse cover lines for: %s\nInclude masthead, issue date, price/barcode or equivalent furniture, strong hierarchy, and avoid: %s.", pageSide(1), title, magType, styleLine(style, "core"), style.Cover, articleTitles(articles, 6), style.Avoid), 3900)
+	return limitPrompt(fmt.Sprintf("Create the cover of %q, a %s.\n%s\nSTYLE: %s\nCOVER STYLE: %s\nUse cover lines for: %s\nInclude masthead, issue date, price/barcode or equivalent furniture, strong hierarchy, and avoid: %s.", title, magType, pageFormatInstruction(), styleLine(style, "core"), style.Cover, articleTitles(articles, 6), style.Avoid), 3900)
 }
 
-func articlePrompt(n int, title string, style magazineStyle, kit creativeKit, kind string, a article, part, totalParts int) string {
+func articlePrompt(n int, title string, style magazineStyle, modules, kind string, a article, part, totalParts int) string {
 	taskStyle := styleLine(style, kind)
-	modules := strings.Join(pickStrings(append(kit.Sidebars, kit.Captions...), n, 3), "; ")
 	partText := ""
 	if totalParts > 1 {
 		partText = fmt.Sprintf("\nSERIES: This is page %d of %d for this item. Continue the same story/feature without repeating the same layout.", part, totalParts)
 	}
-	return limitPrompt(fmt.Sprintf("Create page %d (%s) of %q as a %s page.\nSTYLE: %s\nPAGE STYLE: %s\nFOLIO: Put page number %d on the %s side in the footer.%s\nMODULE IDEAS: %s\nTITLE: %s\nBRIEF/BODY: %s\nLayout with headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful.", n, pageSide(n), title, kind, styleLine(style, "content"), taskStyle, n, pageNumberSide(n), partText, modules, a.Title, compact(a.Body, 1900)), 3900)
+	return limitPrompt(fmt.Sprintf("Create a %s page for %q.\n%s\nSTYLE: %s\nPAGE STYLE: %s%s\nMODULE IDEAS: %s\nTITLE: %s\nBRIEF/BODY: %s\nLayout with headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful.", kind, title, pageFormatInstruction(), styleLine(style, "content"), taskStyle, partText, modules, a.Title, compact(a.Body, 1900)), 3900)
 }
 
 func normalizedArticlePages(a article) int {
@@ -946,9 +955,12 @@ func normalizedArticlePages(a article) int {
 	return a.Pages
 }
 
-func genericPrompt(n int, title string, style magazineStyle, kit creativeKit, kind, task string) string {
-	modules := creativeLine(kit, kind, n)
-	return limitPrompt(fmt.Sprintf("Create page %d (%s) of %q.\nSTYLE: %s\nPAGE STYLE: %s\nFOLIO: Put page number %d on the %s side in the footer.\nIDEAS: %s\nTASK: %s\nKeep header/footer treatment consistent with the issue.", n, pageSide(n), title, styleLine(style, "content"), styleLine(style, kind), n, pageNumberSide(n), modules, task), 3900)
+func genericPrompt(n int, title string, style magazineStyle, modules, kind, task string) string {
+	return limitPrompt(fmt.Sprintf("Create a %s page for %q.\n%s\nSTYLE: %s\nPAGE STYLE: %s\nIDEAS: %s\nTASK: %s\nKeep header/footer treatment consistent with the issue.", kind, title, pageFormatInstruction(), styleLine(style, "content"), styleLine(style, kind), modules, task), 3900)
+}
+
+func pageFormatInstruction() string {
+	return fmt.Sprintf("FORMAT: Portrait magazine page, aspect ratio %d:%d (about 1:1.414), full page visible edge to edge, no 9:16 crop.", pageWidth, pageHeight)
 }
 
 func pageSide(n int) string {
@@ -1049,11 +1061,11 @@ func fallbackStyle(style, referencePath string) magazineStyle {
 
 func fallbackCreativeKit(req buildRequest) creativeKit {
 	return creativeKit{
-		Departments: []string{"editor's note", "short briefs", "reader mail", "listings", "numbers panel", "what's next"},
-		Adverts:     []string{"small classified ad", "full-page fictional supplier advert", "subscription offer", "event notice", "service directory"},
-		Sidebars:    []string{"key facts", "timeline", "quote box", "how it works", "recommended next read", "source notes"},
-		Captions:    []string{"dry editorial caption", "technical caption", "behind-the-scenes note", "short contextual label"},
-		BackPage:    []string{"subscription panel", "single bold advert", "teaser for next issue", "index and closing note"},
+		Departments: []string{"editor's note", "short briefs", "reader mail", "local listings", "numbers panel", "what's next", "staff picks", "calendar strip", "reader poll", "corrections box", "market notes", "archive corner", "field report", "mini interview", "glossary block", "resource list", "event diary", "trend meter"},
+		Adverts:     []string{"small classified ad", "fictional supplier advert", "subscription offer", "event notice", "service directory", "training course ad", "local shop panel", "conference notice", "mail-order coupon", "patron thank-you"},
+		Sidebars:    []string{"key facts", "timeline", "quote box", "how it works", "recommended next read", "source notes", "before and after", "checklist", "map inset", "numbers to know", "pros and cons", "mini profile", "method box", "field notes", "reader tip", "myth versus fact", "toolbox", "quick glossary"},
+		Captions:    []string{"dry editorial caption", "technical caption", "behind-the-scenes note", "short contextual label", "archive caption", "process caption", "comparison note", "source credit line", "location note", "object label", "timeline caption", "quote attribution", "data note", "materials caption", "scene setter", "detail callout", "before-note", "after-note"},
+		BackPage:    []string{"subscription panel", "single bold advert", "teaser for next issue", "index and closing note", "reader challenge", "classified strip", "next-month calendar", "sponsor panel", "credits block", "closing image caption"},
 	}
 }
 
@@ -1177,30 +1189,62 @@ func styleLine(style magazineStyle, kind string) string {
 	return compact(strings.Join([]string{style.Core, style.Typography, style.Color, style.Print, specific, "Avoid: " + style.Avoid}, " "), 900)
 }
 
-func creativeLine(kit creativeKit, kind string, seed int) string {
-	var pool []string
-	switch kind {
-	case "advert":
-		pool = kit.Adverts
-	case "back", "back-page":
-		pool = append(kit.BackPage, kit.Adverts...)
-	case "filler":
-		pool = append(kit.Departments, kit.Sidebars...)
-	default:
-		pool = append(kit.Sidebars, kit.Captions...)
-	}
-	return strings.Join(pickStrings(pool, seed, 4), "; ")
+type modulePlanner struct {
+	pools   map[string][]string
+	used    map[string]bool
+	cursors map[string]int
 }
 
-func pickStrings(in []string, seed, n int) []string {
-	if len(in) == 0 || n <= 0 {
-		return nil
+func newModulePlanner(kit creativeKit) *modulePlanner {
+	return &modulePlanner{
+		pools: map[string][]string{
+			"advert":  uniqueStrings(kit.Adverts),
+			"back":    uniqueStrings(append(append([]string{}, kit.BackPage...), kit.Adverts...)),
+			"filler":  uniqueStrings(append(append([]string{}, kit.Departments...), kit.Sidebars...)),
+			"article": uniqueStrings(append(append([]string{}, kit.Sidebars...), kit.Captions...)),
+			"feature": uniqueStrings(append(append([]string{}, kit.Sidebars...), append(kit.Captions, kit.Departments...)...)),
+		},
+		used:    map[string]bool{},
+		cursors: map[string]int{},
 	}
-	out := make([]string, 0, n)
-	for i := 0; i < n && i < len(in); i++ {
-		out = append(out, in[(seed+i)%len(in)])
+}
+
+func (m *modulePlanner) next(kind string, count, page int) string {
+	if m == nil || count <= 0 {
+		return ""
 	}
-	return out
+	key := kind
+	if key == "back-page" {
+		key = "back"
+	}
+	if key != "advert" && key != "back" && key != "filler" && key != "feature" {
+		key = "article"
+	}
+	pool := m.pools[key]
+	out := make([]string, 0, count)
+	for attempts := 0; len(out) < count && attempts < len(pool)*2; attempts++ {
+		if len(pool) == 0 {
+			break
+		}
+		i := m.cursors[key] % len(pool)
+		m.cursors[key]++
+		item := strings.TrimSpace(pool[i])
+		if item == "" {
+			continue
+		}
+		id := strings.ToLower(item)
+		if m.used[id] {
+			continue
+		}
+		m.used[id] = true
+		out = append(out, item)
+	}
+	for len(out) < count {
+		item := fmt.Sprintf("page %d exclusive %s module %d", page, key, len(out)+1)
+		m.used[strings.ToLower(item)] = true
+		out = append(out, item)
+	}
+	return strings.Join(out, "; ")
 }
 
 var tagRE = regexp.MustCompile(`<[^>]+>`)
@@ -1390,10 +1434,11 @@ func uniqueStrings(in []string) []string {
 	out := []string{}
 	for _, s := range in {
 		s = strings.TrimSpace(s)
-		if s == "" || seen[s] {
+		id := strings.ToLower(s)
+		if s == "" || seen[id] {
 			continue
 		}
-		seen[s] = true
+		seen[id] = true
 		out = append(out, s)
 	}
 	return out
@@ -1556,7 +1601,7 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Magazine Builder</title>
 <style>
-:root{color-scheme:light;--ink:#172026;--muted:#667680;--line:#d9e0e5;--panel:#f6f8fa;--accent:#b3261e;--blue:#235789;--paper:#fffdf8;--soft:#edf2f5}*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink);background:linear-gradient(#eef3f6,#e4e9ed)}button,input,select,textarea{font:inherit}button{border:0;border-radius:6px;background:var(--ink);color:white;padding:10px 14px;font-weight:700;cursor:pointer}button.secondary{background:var(--blue)}button.ghost{background:white;color:var(--ink);border:1px solid var(--line)}button:disabled{opacity:.55;cursor:not-allowed}.spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.shell{max-width:1320px;margin:0 auto;padding:28px 22px 44px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.brand h1{font-size:34px;line-height:1.05;margin:0 0 7px}.brand p{margin:0;color:var(--muted);max-width:650px}.workspace{font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);background:white;border:1px solid var(--line);border-radius:6px;padding:8px 10px}.key-gate{position:fixed;inset:0;z-index:20;background:rgba(232,238,242,.96);display:flex;align-items:center;justify-content:center;padding:20px}.key-gate.hidden{display:none}.key-card{width:min(520px,100%);background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 70px rgba(26,38,48,.18);padding:22px}.key-card h2{margin:0 0 8px;font-size:24px}.key-card p{color:var(--muted);margin:0 0 16px}.key-actions{display:flex;gap:10px;margin-top:14px}.key-actions button{flex:1}.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.step-pill{border:1px solid var(--line);border-radius:8px;padding:11px 12px;background:white;color:var(--muted);font-weight:700}.step-pill.active{background:var(--ink);border-color:var(--ink);color:white}.wizard{background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 45px rgba(26,38,48,.08);overflow:hidden}.wizard-step{display:none;padding:24px}.wizard-step.active{display:block}.step-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:18px}.step-head h2{font-size:22px;margin:0 0 4px}.step-head p{margin:0;color:var(--muted);max-width:720px}.form-grid{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:16px}.field{margin-bottom:14px}label{display:block;font-weight:700;margin:0 0 6px}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:7px;background:white;padding:10px 11px;color:var(--ink)}textarea{min-height:132px;resize:vertical}.style-box textarea{min-height:230px}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.step-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.status{color:var(--muted);font-size:13px;margin:8px 0 0;min-height:18px}.muted{color:var(--muted);font-size:13px}.article-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.article-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-top:14px}.article{border:1px solid var(--line);background:white;border-radius:8px;padding:12px}.article textarea{min-height:120px}.hidden{display:none!important}.toolbar{display:flex;gap:8px;margin:18px 0 10px;flex-wrap:wrap}.toolbar button{flex:none}.results{margin-top:18px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px}.page{background:white;border:1px solid var(--line);border-radius:8px;padding:12px;min-height:220px}.page[draggable=true]{cursor:grab}.page.dragging{opacity:.45}.fixed{opacity:.72}.kind{font-size:12px;color:white;background:var(--accent);display:inline-block;border-radius:999px;padding:2px 8px;text-transform:uppercase}.page h3{margin:8px 0;font-size:18px}.prompt{width:100%;min-height:180px;color:#26343c;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f8fafb;border:1px solid var(--line);border-radius:6px;padding:8px;resize:vertical}.template-preview{display:grid;grid-template-columns:minmax(220px,320px) 1fr;gap:14px;align-items:start;background:white;border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px 0}.template-preview img{width:100%;aspect-ratio:9/16;object-fit:cover;border:1px solid var(--line);border-radius:6px}.template-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.kit{white-space:pre-wrap;background:white;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:12px}.preview{width:100%;aspect-ratio:9/16;object-fit:cover;border:1px solid var(--line);border-radius:6px;background:#f5f7f8;margin:8px 0}.page-status{font-size:12px;color:var(--muted);margin:4px 0 8px}@media(max-width:760px){.shell{padding:18px 12px 32px}.hero{display:block}.brand h1{font-size:28px}.steps{grid-template-columns:1fr 1fr}.form-grid,.article-tools{grid-template-columns:1fr}.wizard-step{padding:16px}.step-head{display:block}.step-actions{justify-content:stretch}.step-actions button{flex:1}}
+:root{color-scheme:light;--ink:#172026;--muted:#667680;--line:#d9e0e5;--panel:#f6f8fa;--accent:#b3261e;--blue:#235789;--paper:#fffdf8;--soft:#edf2f5}*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink);background:linear-gradient(#eef3f6,#e4e9ed)}button,input,select,textarea{font:inherit}button{border:0;border-radius:6px;background:var(--ink);color:white;padding:10px 14px;font-weight:700;cursor:pointer}button.secondary{background:var(--blue)}button.ghost{background:white;color:var(--ink);border:1px solid var(--line)}button:disabled{opacity:.55;cursor:not-allowed}.spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.shell{max-width:1320px;margin:0 auto;padding:28px 22px 44px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.brand h1{font-size:34px;line-height:1.05;margin:0 0 7px}.brand p{margin:0;color:var(--muted);max-width:650px}.workspace{font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);background:white;border:1px solid var(--line);border-radius:6px;padding:8px 10px}.key-gate{position:fixed;inset:0;z-index:20;background:rgba(232,238,242,.96);display:flex;align-items:center;justify-content:center;padding:20px}.key-gate.hidden{display:none}.key-card{width:min(520px,100%);background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 70px rgba(26,38,48,.18);padding:22px}.key-card h2{margin:0 0 8px;font-size:24px}.key-card p{color:var(--muted);margin:0 0 16px}.key-actions{display:flex;gap:10px;margin-top:14px}.key-actions button{flex:1}.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.step-pill{border:1px solid var(--line);border-radius:8px;padding:11px 12px;background:white;color:var(--muted);font-weight:700}.step-pill.active{background:var(--ink);border-color:var(--ink);color:white}.wizard{background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 45px rgba(26,38,48,.08);overflow:hidden}.wizard-step{display:none;padding:24px}.wizard-step.active{display:block}.step-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:18px}.step-head h2{font-size:22px;margin:0 0 4px}.step-head p{margin:0;color:var(--muted);max-width:720px}.form-grid{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:16px}.field{margin-bottom:14px}label{display:block;font-weight:700;margin:0 0 6px}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:7px;background:white;padding:10px 11px;color:var(--ink)}textarea{min-height:132px;resize:vertical}.style-box textarea{min-height:230px}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.step-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.status{color:var(--muted);font-size:13px;margin:8px 0 0;min-height:18px}.muted{color:var(--muted);font-size:13px}.article-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.article-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-top:14px}.article{border:1px solid var(--line);background:white;border-radius:8px;padding:12px}.article textarea{min-height:120px}.hidden{display:none!important}.toolbar{display:flex;gap:8px;margin:18px 0 10px;flex-wrap:wrap}.toolbar button{flex:none}.results{margin-top:18px}.grid{display:grid;gap:14px}.top-pair,.spread{display:grid;grid-template-columns:repeat(2,minmax(290px,1fr));gap:12px;align-items:start}.spread{border-top:1px solid var(--line);padding-top:14px}.progress{height:10px;background:#dfe6eb;border-radius:999px;overflow:hidden;margin:10px 0}.progress-bar{height:100%;width:0;background:var(--accent);transition:width .25s ease}.progress-row{margin:10px 0 14px}.page{background:white;border:1px solid var(--line);border-radius:8px;padding:12px;min-height:220px}.page[draggable=true]{cursor:grab}.page.dragging{opacity:.45}.fixed{opacity:.72}.kind{font-size:12px;color:white;background:var(--accent);display:inline-block;border-radius:999px;padding:2px 8px;text-transform:uppercase}.page h3{margin:8px 0;font-size:18px}.prompt{width:100%;min-height:180px;color:#26343c;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f8fafb;border:1px solid var(--line);border-radius:6px;padding:8px;resize:vertical}.template-preview{display:grid;grid-template-columns:minmax(220px,320px) 1fr;gap:14px;align-items:start;background:white;border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px 0}.template-preview img{width:100%;aspect-ratio:1240/1754;object-fit:cover;border:1px solid var(--line);border-radius:6px}.template-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.kit{white-space:pre-wrap;background:white;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:12px}.preview{width:100%;aspect-ratio:1240/1754;object-fit:cover;border:1px solid var(--line);border-radius:6px;background:#f5f7f8;margin:8px 0}.page-status{font-size:12px;color:var(--muted);margin:4px 0 8px}@media(max-width:760px){.shell{padding:18px 12px 32px}.hero{display:block}.brand h1{font-size:28px}.steps{grid-template-columns:1fr 1fr}.form-grid,.article-tools,.top-pair,.spread{grid-template-columns:1fr}.wizard-step{padding:16px}.step-head{display:block}.step-actions{justify-content:stretch}.step-actions button{flex:1}}
 </style>
 </head>
 <body>
@@ -1611,7 +1656,7 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
 
 </div>
 <script>
-let articles=[];let lastPlan=null;let referencePath='';let workspace='';let apiKey=localStorage.getItem('defapiApiKey')||'';let renderedImages={};let renderedTemplate=null;let draggedIndex=null;let currentStep=1;let busyCount=0;let isRendering=false;
+let articles=[];let lastPlan=null;let referencePath='';let workspace='';let apiKey=localStorage.getItem('defapiApiKey')||'';let renderedImages={};let renderedTemplate=null;let templatePrompt='';let draggedIndex=null;let currentStep=1;let busyCount=0;let isRendering=false;
 const $=id=>document.getElementById(id);
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function lockButtons(on){document.body.classList.toggle('busy',on);document.querySelectorAll('button').forEach(b=>{if(on){b.dataset.wasDisabled=b.disabled?'1':'0';b.disabled=true}else{b.disabled=b.dataset.wasDisabled==='1';delete b.dataset.wasDisabled}})}
@@ -1640,34 +1685,37 @@ $('addFeature').onclick=()=>{if(isRendering)return;articles.push({kind:'feature'
 $('clear').onclick=()=>{if(isRendering)return;$('style').value='';$('reference').value='';referencePath='';workspace='';$('styleStatus').textContent=''};
 $('generateArticles').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{if(!await ensureStyle())return;$('generateStatus').textContent='Writing articles for this publication...';const res=await fetch('/api/generate-articles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,style:$('style').value,count:4,workspace,apiKey})});const data=await res.json();if(!res.ok){$('generateStatus').textContent=data.error||'Failed';return}workspace=data.workspace||workspace;updateWorkspaceLabel();articles=articles.concat((data.articles||[]).map(a=>Object.assign({kind:'article',pages:1},a)));renderArticles();$('generateStatus').textContent='Generated '+(data.articles||[]).length+' articles.'});
 $('importRSS').onclick=e=>withBusy(e.currentTarget,'Importing...',async()=>{if(!await ensureStyle())return;$('rssStatus').textContent='Fetching articles, extracting pages and rewriting...';const res=await fetch('/api/import-rss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:$('rss').value,limit:10,style:$('style').value,workspace,apiKey})});const data=await res.json();if(!res.ok){$('rssStatus').textContent=data.error||'Failed';return}workspace=data.workspace||workspace;updateWorkspaceLabel();articles=articles.concat((data.articles||[]).map(a=>Object.assign({kind:'article',pages:1},a)));renderArticles();$('rssStatus').textContent='Imported '+(data.articles||[]).length+' rewritten articles.'});
-async function buildPlan(){if(!await ensureStyle())return;const payload={title:$('title').value,magazineType:'',style:$('style').value,pageCount:+$('pageCount').value,articles,workspace,apiKey};const out=$('output');out.innerHTML='<div class="kit">Rewriting manual articles and generating plan...</div>';renderedImages={};const res=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await res.json();if(!res.ok){out.innerHTML='<div class="kit">'+esc(data.error||'Failed')+'</div>';return}lastPlan=data;workspace=data.workspace||workspace;updateWorkspaceLabel();lastPlan.reference=referencePath;articles=uniquePlannedArticles(data.pages||[]);renderArticles();renderPlan(data)}
+async function buildPlan(){if(!await ensureStyle())return;const payload={title:$('title').value,magazineType:'',style:$('style').value,pageCount:+$('pageCount').value,articles,workspace,apiKey};const out=$('output');out.innerHTML=progressHTML('Planning issue...',8,'planProgress');renderedImages={};setProgress('planProgress',22,'Enhancing articles...');const res=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});setProgress('planProgress',75,'Building page order...');const data=await res.json();if(!res.ok){out.innerHTML='<div class="kit">'+esc(data.error||'Failed')+'</div>';return}lastPlan=data;workspace=data.workspace||workspace;updateWorkspaceLabel();lastPlan.reference=referencePath;templatePrompt=templatePrompt||defaultTemplatePrompt(data.style||{});articles=uniquePlannedArticles(data.pages||[]);renderArticles();setProgress('planProgress',100,'Plan ready.');renderPlan(data)}
 $('build').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{await buildPlan();if(lastPlan)showStep(3)});
 $('download').onclick=()=>{if(!lastPlan||isRendering)return;const blob=new Blob([JSON.stringify(lastPlan,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='magazine-plan.json';a.click();URL.revokeObjectURL(a.href)};
 $('render').onclick=e=>withBusy(e.currentTarget,'Preparing...',()=>startRenderFlow());$('renderSide').onclick=e=>withBusy(e.currentTarget,'Preparing...',()=>startRenderFlow());$('downloadPdfJson').onclick=()=>$('download').click();
+function progressHTML(label,pct,id){id=id||'planProgress';return '<div class="progress-row"><div class="status" id="'+id+'Text">'+esc(label)+'</div><div class="progress"><div class="progress-bar" id="'+id+'" style="width:'+pct+'%"></div></div></div>'}
+function setProgress(id,pct,label){const bar=$(id);if(bar)bar.style.width=Math.max(0,Math.min(100,pct))+'%';const text=$(id+'Text')||$(id==='renderProgress'?'renderProgressText':'planProgressText');if(text&&label)text.textContent=label}
+function defaultTemplatePrompt(style){const styleText=style&&style.template?style.template:'blank content-page production dummy with header, folio, grid and image boxes';return 'Create one completely text-free magazine page layout template.\nFORMAT: Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.\nTEMPLATE: '+styleText+'\nShow only generic layout geometry: paper texture, margins, column rhythm, blank header band, blank footer band, empty image rectangles, pale rule lines and subtle placeholder blocks. Absolutely no readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no registration marks, no technical print marks, no UI and no moodboard.'}
 function renderPlan(data){
   const kit=typeof data.creativeKit==='string'?data.creativeKit:JSON.stringify(data.creativeKit,null,2);
-  let pageItems=(data.pages||[]).map((p,i)=>pageHTML(p,i));if(currentStep===4&&pageItems.length>1)pageItems.splice(1,0,templateCardHTML());const pages=pageItems.join('');
   const target=(currentStep===4&&$('renderOutput'))?$('renderOutput'):$('output');
   if(!target)return;
-  target.innerHTML='<div class="kit"><strong>Style JSON</strong>\n'+esc(JSON.stringify(data.style||{},null,2))+'\n\n<strong>Creative kit</strong>\n'+esc(kit)+'</div><div id="pageGrid" class="grid">'+pages+'</div>';
+  target.innerHTML='<div class="kit"><strong>Style JSON</strong>\n'+esc(JSON.stringify(data.style||{},null,2))+'\n\n<strong>Creative kit</strong>\n'+esc(kit)+'</div><div id="pageGrid" class="grid">'+pageGridHTML(data.pages||[])+'</div>';
   wirePromptEditors();
   wireTemplateActions();
   wireDrag();
 }
+function pageGridHTML(pages){const cover=pages[0]?pageHTML(pages[0],0):'';let html='<div class="top-pair">'+cover+templateCardHTML()+'</div>';const rest=pages.slice(1);for(let i=0;i<rest.length;i+=2){html+='<div class="spread">'+pageHTML(rest[i],i+1)+(rest[i+1]?pageHTML(rest[i+1],i+2):'<article class="page fixed"><span class="kind">blank</span><h3>Inside cover</h3><div class="preview"></div></article>')+'</div>'}return html}
 function pageHTML(p,i){const fixed=i===0||i===(lastPlan.pages.length-1);const item=renderedImages[p.number]||null;const img=item?item.image:'';const canDrag=!fixed&&!isRendering;return '<article class="page '+(fixed?'fixed':'')+'" data-i="'+i+'" draggable="'+canDrag+'"><span class="kind">'+esc(p.kind)+'</span><h3>'+p.number+'. '+esc(p.title)+'</h3><div class="page-status" id="status-'+p.number+'">'+(img?'Rendered':(fixed?'Fixed page':(isRendering?'Render locked':'Drag to reorder')))+'</div>'+(img?'<img class="preview" src="'+esc(img)+'">':'<div class="preview"></div>')+'<label>Image prompt</label><textarea class="prompt" data-prompt-i="'+i+'">'+esc(p.prompt)+'</textarea></article>'}
-function templateCardHTML(){const ready=renderedTemplate&&renderedTemplate.publicUrl;const img=renderedTemplate&&renderedTemplate.image?'<img class="preview" src="'+esc(renderedTemplate.image)+'">':'<div class="preview"></div>';const status=ready?'Review before rendering content pages':'Template will appear here before content pages render';return '<article class="page fixed"><span class="kind">template</span><h3>2. Content template</h3><div class="page-status">'+status+'</div>'+img+'<div class="template-actions"><button id="templateUse" class="secondary" '+(ready?'':'disabled')+'>✓ Use</button><button id="templateRefresh" class="ghost" '+(ready?'':'disabled')+'>↻ Refresh</button></div></article>'}
-function wireTemplateActions(){const use=$('templateUse');if(use)use.onclick=e=>{if(renderedTemplate&&renderedTemplate.publicUrl)withBusy(e.currentTarget,'Rendering...',()=>renderRemainingPages(renderedTemplate.publicUrl))};const refresh=$('templateRefresh');if(refresh)refresh.onclick=e=>{if(renderedTemplate)withBusy(e.currentTarget,'Regenerating...',()=>renderTemplateForReview())}}
+function templateCardHTML(){const ready=renderedTemplate&&renderedTemplate.publicUrl;const img=renderedTemplate&&renderedTemplate.image?'<img class="preview" src="'+esc(renderedTemplate.image)+'">':'<div class="preview"></div>';const status=ready?'Review before rendering content pages':'Template placeholder, edit prompt before rendering';return '<article class="page fixed"><span class="kind">template</span><h3>Template</h3><div class="page-status">'+status+'</div>'+img+'<label>Template prompt</label><textarea class="prompt" id="templatePrompt">'+esc(templatePrompt||defaultTemplatePrompt(lastPlan&&lastPlan.style||{}))+'</textarea><div class="template-actions"><button id="templateUse" class="secondary" '+(ready?'':'disabled')+'>✓ Use</button><button id="templateRefresh" class="ghost" '+(templatePrompt?'':'disabled')+'>↻ Refresh</button></div></article>'}
+function wireTemplateActions(){const prompt=$('templatePrompt');if(prompt)prompt.oninput=e=>{templatePrompt=e.target.value};const use=$('templateUse');if(use)use.onclick=e=>{if(renderedTemplate&&renderedTemplate.publicUrl)withBusy(e.currentTarget,'Rendering...',()=>renderRemainingPages(renderedTemplate.publicUrl))};const refresh=$('templateRefresh');if(refresh)refresh.onclick=e=>{templatePrompt=$('templatePrompt')?$('templatePrompt').value:templatePrompt;withBusy(e.currentTarget,'Regenerating...',()=>renderTemplateForReview())}}
 function wirePromptEditors(){document.querySelectorAll('[data-prompt-i]').forEach(el=>el.oninput=e=>{const i=+e.target.dataset.promptI;if(lastPlan&&lastPlan.pages[i])lastPlan.pages[i].prompt=e.target.value})}
 function uniquePlannedArticles(pages){const seen=new Set();const out=[];(pages||[]).forEach(p=>{if(!p.article)return;const key=[p.article.kind||'article',p.article.title||'',p.article.body||'',p.article.source||''].join('\u001f');if(seen.has(key))return;seen.add(key);out.push(Object.assign({kind:'article',pages:1},p.article))});return out}
 function wireDrag(){if(isRendering)return;document.querySelectorAll('.page[draggable=true]').forEach(card=>{card.ondragstart=e=>{draggedIndex=+card.dataset.i;card.classList.add('dragging')};card.ondragend=e=>card.classList.remove('dragging');card.ondragover=e=>e.preventDefault();card.ondrop=e=>{e.preventDefault();const target=+card.dataset.i;if(draggedIndex===null||target===0||target===lastPlan.pages.length-1||isRendering)return;movePage(draggedIndex,target)}})}
 function movePage(from,to){const pages=lastPlan.pages;if(isRendering||from===0||from===pages.length-1||to===0||to===pages.length-1)return;const [p]=pages.splice(from,1);pages.splice(to,0,p);renumberPages();renderPlan(lastPlan)}
-function renumberPages(){lastPlan.pages.forEach((p,i)=>{const old=p.number;p.number=i+1;p.prompt=renumberPrompt(p.prompt,old,p.number)})}
-function renumberPrompt(prompt,oldNo,newNo){let s=String(prompt);s=s.replace(new RegExp('page '+oldNo,'gi'),'page '+newNo);s=s.replace(new RegExp('Page '+oldNo,'g'),'Page '+newNo);s=s.replace(new RegExp('side '+oldNo,'gi'),'side '+newNo);s=s.replace(new RegExp('number '+oldNo,'gi'),'number '+newNo);return s}
-async function startRenderFlow(){if(!lastPlan){$('renderStatus').textContent='Generate a plan first.';return}isRendering=true;showStep(4);renderedImages={};renderedTemplate=null;$('templateReview').innerHTML='';renderPlan(lastPlan);try{$('renderStatus').textContent='Rendering cover...';let cover=await renderPage(lastPlan.pages[0], '');renderedImages[1]=cover;renderPlan(lastPlan);await renderTemplateForReview()}catch(e){$('renderStatus').textContent=e.message||'Render failed';isRendering=false;renderPlan(lastPlan)}}
-async function renderTemplateForReview(){ $('renderStatus').textContent='Rendering shared content template...';const template=await renderTemplate();renderedTemplate=template;const templateRef=template.publicUrl||'';if(!templateRef){$('renderStatus').textContent='Template rendered, but imagegen did not return a public Image URL. Check workspace log.';isRendering=false;renderPlan(lastPlan);return}$('renderStatus').textContent='Review the template card beside the cover before rendering content pages.';$('templateReview').innerHTML='<p class="muted">Use ✓ or refresh ↻ on the template card.</p>';renderPlan(lastPlan)}
-async function renderRemainingPages(templateRef){try{$('templateReview').innerHTML='';renderedTemplate=null;$('renderStatus').textContent='Rendering content pages...';const middle=lastPlan.pages.slice(1);for(let i=0;i<middle.length;i+=3){await Promise.all(middle.slice(i,i+3).map(async p=>{const img=await renderPage(p, templateRef);renderedImages[p.number]=img;renderPlan(lastPlan)}))}const ordered=lastPlan.pages.map(p=>renderedImages[p.number]&&renderedImages[p.number].image).filter(Boolean);$('renderStatus').textContent='Writing PDF...';const res=await fetch('/api/write-pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,images:ordered,workspace})});const data=await res.json();if(!res.ok){$('renderStatus').textContent=data.error||'PDF failed';return}$('renderStatus').innerHTML='Done. Download should start automatically. <a href="'+esc(data.pdf)+'" target="_blank">Open PDF</a>';const a=document.createElement('a');a.href=data.pdf;a.download='';document.body.appendChild(a);a.click();a.remove()}finally{isRendering=false;renderPlan(lastPlan)}}
-async function renderTemplate(){const res=await fetch('/api/render-template',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:lastPlan.style,reference:referencePath,workspace,apiKey})});const data=await res.json();if(!res.ok)throw new Error(data.error||'template failed');return {image:data.image,publicUrl:data.publicUrl||''}}
-async function renderPage(page,styleReference){setStatus(page.number,'Rendering...');const ref=page.number===1?referencePath:'';const res=await fetch('/api/render-page',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page,styleReference,reference:ref,workspace,apiKey})});const data=await res.json();if(!res.ok){setStatus(page.number,data.error||'Failed');throw new Error(data.error||'render failed')}setStatus(page.number,'Rendered');return {image:data.image,publicUrl:data.publicUrl||''}}
+function renumberPages(){lastPlan.pages.forEach((p,i)=>{p.number=i+1})}
+async function startRenderFlow(){if(!lastPlan){$('renderStatus').textContent='Generate a plan first.';return}isRendering=true;showStep(4);renderedImages={};renderedTemplate=null;$('templateReview').innerHTML='';$('renderStatus').innerHTML=progressHTML('Rendering cover...',5,'renderProgress');renderPlan(lastPlan);try{setProgress('renderProgress',10,'Rendering cover...');let cover=await renderPage(lastPlan.pages[0], '');renderedImages[1]=cover;setProgress('renderProgress',25,'Rendering template...');renderPlan(lastPlan);await renderTemplateForReview()}catch(e){$('renderStatus').textContent=e.message||'Render failed';isRendering=false;renderPlan(lastPlan)}}
+async function renderTemplateForReview(){setProgress('renderProgress',35,'Rendering shared content template...');const template=await renderTemplate();renderedTemplate=template;const templateRef=template.publicUrl||'';if(!templateRef){$('renderStatus').textContent='Template rendered, but imagegen did not return a public Image URL. Check workspace log.';isRendering=false;renderPlan(lastPlan);return}setProgress('renderProgress',42,'Review the template card beside the cover.');$('templateReview').innerHTML='<p class="muted">Use ✓ or refresh ↻ on the template card.</p>';renderPlan(lastPlan)}
+async function renderRemainingPages(templateRef){try{$('templateReview').innerHTML='';renderedTemplate=null;const middle=lastPlan.pages.slice(1);setProgress('renderProgress',45,'Rendering content pages...');for(let i=0;i<middle.length;i+=3){await Promise.all(middle.slice(i,i+3).map(async p=>{const img=await renderPage(p, templateRef);renderedImages[p.number]=img;renderPlan(lastPlan)}));const done=Math.min(middle.length,i+3);setProgress('renderProgress',45+Math.round((done/Math.max(1,middle.length))*45),'Rendered '+done+' of '+middle.length+' content pages.')}const ordered=lastPlan.pages.map(p=>renderedImages[p.number]&&renderedImages[p.number].image).filter(Boolean);setProgress('renderProgress',94,'Writing PDF...');const res=await fetch('/api/write-pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,images:ordered,workspace})});const data=await res.json();if(!res.ok){$('renderStatus').textContent=data.error||'PDF failed';return}setProgress('renderProgress',100,'Done. Download should start automatically.');$('renderStatus').insertAdjacentHTML('beforeend','<div class="status"><a href="'+esc(data.pdf)+'" target="_blank">Open PDF</a></div>');const a=document.createElement('a');a.href=data.pdf;a.download='';document.body.appendChild(a);a.click();a.remove()}finally{isRendering=false;renderPlan(lastPlan)}}
+async function renderTemplate(){templatePrompt=$('templatePrompt')?$('templatePrompt').value:templatePrompt;const res=await fetch('/api/render-template',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:lastPlan.style,reference:referencePath,workspace,apiKey,prompt:templatePrompt})});const data=await res.json();if(!res.ok)throw new Error(data.error||'template failed');return {image:data.image,publicUrl:data.publicUrl||''}}
+async function renderPage(page,styleReference){setStatus(page.number,'Rendering...');const ref=page.number===1?referencePath:'';const renderPage=Object.assign({},page,{prompt:finalRenderPrompt(page)});const res=await fetch('/api/render-page',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page:renderPage,styleReference,reference:ref,workspace,apiKey})});const data=await res.json();if(!res.ok){setStatus(page.number,data.error||'Failed');throw new Error(data.error||'render failed')}setStatus(page.number,'Rendered');return {image:data.image,publicUrl:data.publicUrl||''}}
+function finalRenderPrompt(page){const side=page.number%2===0?'left-hand page':'right-hand page';const folioSide=page.number%2===0?'left':'right';return String(page.prompt||'')+'\n\nRENDER POSITION: This is page '+page.number+', a '+side+'. Put page number '+page.number+' on the '+folioSide+' side in the footer.'}
 function setStatus(n,msg){const el=$('status-'+n);if(el)el.textContent=msg}
 renderArticles();updateWorkspaceLabel();showStep(1);requireApiKey();
 </script>

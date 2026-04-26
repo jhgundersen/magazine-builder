@@ -58,14 +58,13 @@ func TestParseImageURL(t *testing.T) {
 
 func TestPromptsIncludePageSideAndFolioSide(t *testing.T) {
 	style := fallbackStyle("quiet magazine", "")
-	kit := fallbackCreativeKit(buildRequest{})
-	got := articlePrompt(2, "Test", style, kit, "article", article{Title: "A", Body: "Body"}, 1, 1)
-	if !strings.Contains(got, "left-hand page") || !strings.Contains(got, "Put page number 2 on the left side") {
-		t.Fatalf("left page prompt missing side instructions: %s", got)
+	got := articlePrompt(2, "Test", style, "quote box; timeline", "article", article{Title: "A", Body: "Body"}, 1, 1)
+	if strings.Contains(got, "left-hand page") || strings.Contains(got, "Put page number 2") {
+		t.Fatalf("editable article prompt should not include final page placement: %s", got)
 	}
-	got = genericPrompt(3, "Test", style, kit, "filler", "Task")
-	if !strings.Contains(got, "right-hand page") || !strings.Contains(got, "Put page number 3 on the right side") {
-		t.Fatalf("right page prompt missing side instructions: %s", got)
+	got = genericPrompt(3, "Test", style, "reader mail; chart", "filler", "Task")
+	if strings.Contains(got, "right-hand page") || strings.Contains(got, "Put page number 3") {
+		t.Fatalf("editable generic prompt should not include final page placement: %s", got)
 	}
 }
 
