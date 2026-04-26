@@ -74,6 +74,25 @@ $("changeApiKey").onclick = () => {
   $("apiKeyInput").value = apiKey;
   $("keyGate").classList.remove("hidden");
 };
+document.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-template-action]");
+  if (!button || button.disabled) return;
+  e.preventDefault();
+  templatePrompt = getTemplatePrompt();
+  if (button.dataset.templateAction === "use") {
+    if (renderedTemplate && renderedTemplate.publicUrl) {
+      withBusy(button, "Rendering...", () =>
+        renderRemainingPages(renderedTemplate.publicUrl),
+      );
+    }
+    return;
+  }
+  if (button.dataset.templateAction === "refresh" && lastPlan) {
+    renderedTemplate = null;
+    renderPlan(lastPlan);
+    withBusy(button, "Regenerating...", () => renderTemplateForReview());
+  }
+});
 function updateWorkspaceLabel() {
   const el = $("workspaceLabel");
   if (el)
@@ -316,6 +335,7 @@ $("importRSS").onclick = (e) =>
   });
 async function buildPlan() {
   if (!(await ensureStyle())) return;
+  ensureClientWorkspace();
   const payload = {
     title: $("title").value,
     magazineType: "",
@@ -328,18 +348,14 @@ async function buildPlan() {
   const out = $("output");
   const textgenCalls = estimatePlanTextgenCalls();
   out.innerHTML = progressHTML(
-    "Preparing " + textgenCalls + " textgen call(s)...",
+    "Waiting for " + textgenCalls + " textgen call(s)...",
     8,
     "planProgress",
   );
   renderedImages = {};
-  const progressTimer = startEstimatedCallProgress(
-    "planProgress",
-    textgenCalls,
-    "Textgen",
-    10,
-    88,
-  );
+  const progressPoller = workspace
+    ? startProgressPolling(workspace, "build", "planProgress")
+    : null;
   let res;
   try {
     res = await fetch("/api/build", {
@@ -348,7 +364,7 @@ async function buildPlan() {
       body: JSON.stringify(payload),
     });
   } finally {
-    clearInterval(progressTimer);
+    if (progressPoller) progressPoller.stop();
   }
   setProgress("planProgress", 90, "Building page order...");
   const data = await res.json();
@@ -368,6 +384,14 @@ async function buildPlan() {
   renderArticles();
   setProgress("planProgress", 100, "Plan ready.");
   renderPlan(data);
+}
+function ensureClientWorkspace() {
+  if (workspace) return;
+  workspace =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : "browser-" + Date.now().toString(36);
+  updateWorkspaceLabel();
 }
 $("build").onclick = (e) =>
   withBusy(e.currentTarget, "Generating...", async () => {
@@ -415,22 +439,36 @@ function setProgress(id, pct, label) {
 function estimatePlanTextgenCalls() {
   return 1 + articles.filter((a) => !a.enhanced).length;
 }
-function startEstimatedCallProgress(id, total, label, startPct, endPct) {
-  total = Math.max(1, total);
-  let tick = 0;
-  setProgress(id, startPct, label + " call 1 of " + total + "...");
-  return setInterval(() => {
-    tick++;
-    const estimatedCall = Math.min(total, Math.floor(tick / 8) + 1);
-    const pct =
-      startPct +
-      Math.min(0.95, tick / Math.max(8, total * 8)) * (endPct - startPct);
-    setProgress(
-      id,
-      Math.round(pct),
-      label + " call " + estimatedCall + " of " + total + "...",
-    );
-  }, 1000);
+function startProgressPolling(workspaceId, kind, progressId) {
+  let stopped = false;
+  async function poll() {
+    if (stopped || !workspaceId) return;
+    try {
+      const res = await fetch(
+        "/api/progress?workspace=" +
+          encodeURIComponent(workspaceId) +
+          "&kind=" +
+          encodeURIComponent(kind),
+      );
+      const data = await res.json();
+      if (res.ok && data.total > 0) {
+        const pct = Math.round((data.done / Math.max(1, data.total)) * 100);
+        const label =
+          data.message + " (" + data.done + " of " + data.total + " complete)";
+        setProgress(progressId, pct, label);
+      }
+    } catch (_) {
+      // The main request may still be running; keep polling quietly.
+    }
+  }
+  poll();
+  const timer = setInterval(poll, 800);
+  return {
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
 }
 function setRenderProgress(label) {
   const next = Math.min(renderCallTotal, renderCallDone + 1);
@@ -627,52 +665,33 @@ function templateCardHTML() {
     status +
     "</div>" +
     img +
-    '<label>Template prompt</label><textarea class="prompt" id="templatePrompt">' +
+    '<label>Template prompt</label><textarea class="prompt" data-template-prompt>' +
     esc(
       templatePrompt ||
         defaultTemplatePrompt((lastPlan && lastPlan.style) || {}),
     ) +
-    '</textarea><div class="template-actions"><button id="templateUse" class="secondary" ' +
+    '</textarea><div class="template-actions"><button data-template-action="use" class="secondary" ' +
     (ready ? "" : "disabled") +
-    '>✓ Use</button><button id="templateRefresh" class="ghost" ' +
+    '>✓ Use</button><button data-template-action="refresh" class="ghost" ' +
     (lastPlan ? "" : "disabled") +
     ">↻ Refresh</button></div></article>"
   );
 }
 function getTemplatePrompt() {
-  const prompt = $("templatePrompt");
+  const prompt = document.querySelector(
+    ".wizard-step.active [data-template-prompt]",
+  );
   return prompt
     ? prompt.value
     : templatePrompt ||
         defaultTemplatePrompt((lastPlan && lastPlan.style) || {});
 }
 function wireTemplateActions() {
-  const prompt = $("templatePrompt");
-  if (prompt)
+  document.querySelectorAll("[data-template-prompt]").forEach((prompt) => {
     prompt.oninput = (e) => {
       templatePrompt = e.target.value;
     };
-  const use = $("templateUse");
-  if (use)
-    use.onclick = (e) => {
-      e.preventDefault();
-      templatePrompt = getTemplatePrompt();
-      if (renderedTemplate && renderedTemplate.publicUrl)
-        withBusy(e.currentTarget, "Rendering...", () =>
-          renderRemainingPages(renderedTemplate.publicUrl),
-        );
-    };
-  const refresh = $("templateRefresh");
-  if (refresh)
-    refresh.onclick = (e) => {
-      e.preventDefault();
-      templatePrompt = getTemplatePrompt();
-      renderedTemplate = null;
-      renderPlan(lastPlan);
-      withBusy(e.currentTarget, "Regenerating...", () =>
-        renderTemplateForReview(),
-      );
-    };
+  });
 }
 function wirePromptEditors() {
   document.querySelectorAll("[data-prompt-i]").forEach(

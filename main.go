@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -48,7 +49,17 @@ type config struct {
 }
 
 type server struct {
-	cfg config
+	cfg      config
+	mu       sync.Mutex
+	progress map[string]progressStatus
+}
+
+type progressStatus struct {
+	Kind    string `json:"kind"`
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
+	Message string `json:"message"`
+	Running bool   `json:"running"`
 }
 
 type apiKeyContextKey struct{}
@@ -210,7 +221,7 @@ func main() {
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		log.Fatal(err)
 	}
-	s := &server{cfg: cfg}
+	s := &server{cfg: cfg, progress: map[string]progressStatus{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/enhance-style", s.handleEnhanceStyle)
@@ -220,6 +231,7 @@ func main() {
 	mux.HandleFunc("/api/render-page", s.handleRenderPage)
 	mux.HandleFunc("/api/render-template", s.handleRenderTemplate)
 	mux.HandleFunc("/api/write-pdf", s.handleWritePDF)
+	mux.HandleFunc("/api/progress", s.handleProgress)
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	mux.Handle("/work/", http.StripPrefix("/work/", http.FileServer(http.Dir(cfg.WorkDir))))
 	log.Printf("magazine-builder listening on http://localhost%s", cfg.Addr)
@@ -374,11 +386,20 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	total := 1
+	for _, a := range req.Articles {
+		if !a.Enhanced {
+			total++
+		}
+	}
+	done := 0
+	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Starting textgen work", Running: true})
 	s.workspaceLog(workspace, "build: start title=%q articles=%d pages=%d", req.Title, len(req.Articles), req.PageCount)
 	for i := range req.Articles {
 		if req.Articles[i].Enhanced {
 			continue
 		}
+		s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewriting %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
 		var improved article
 		var err error
 		if req.Articles[i].Kind == "feature" {
@@ -388,19 +409,37 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			log.Printf("textgen manual article rewrite failed for %q: %v", req.Articles[i].Title, err)
+			done++
+			s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewrite failed for %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
 			continue
 		}
 		improved.Enhanced = true
 		req.Articles[i] = improved
+		done++
+		s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewritten %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
 	}
+	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Generating creative kit", Running: true})
 	kit, err := s.generateCreativeKit(ctx, req, style)
 	if err != nil {
 		log.Printf("textgen creative kit failed: %v", err)
 		s.workspaceLog(workspace, "build: creative kit failed: %v", err)
 		kit = fallbackCreativeKit(req)
 	}
+	done++
+	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Plan ready", Running: false})
 	s.workspaceLog(workspace, "build: complete")
 	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, Articles: req.Articles, Pages: planMagazine(req, style, kit), Workspace: workspace})
+}
+
+func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	workspace := sanitizeWorkspace(r.URL.Query().Get("workspace"))
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	status := s.progressStatus(workspace, kind)
+	writeJSON(w, status)
 }
 
 func (s *server) handleRenderTemplate(w http.ResponseWriter, r *http.Request) {
@@ -558,6 +597,39 @@ func (s *server) workspaceLog(workspace, format string, args ...any) {
 	}
 	defer f.Close()
 	_, _ = f.WriteString(line)
+}
+
+func (s *server) setProgress(workspace string, status progressStatus) {
+	workspace = sanitizeWorkspace(workspace)
+	if workspace == "" {
+		return
+	}
+	if status.Kind == "" {
+		status.Kind = "default"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.progress == nil {
+		s.progress = map[string]progressStatus{}
+	}
+	s.progress[workspace+":"+status.Kind] = status
+}
+
+func (s *server) progressStatus(workspace, kind string) progressStatus {
+	workspace = sanitizeWorkspace(workspace)
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		kind = "default"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.progress == nil {
+		return progressStatus{Kind: kind, Message: "No progress yet"}
+	}
+	if status, ok := s.progress[workspace+":"+kind]; ok {
+		return status
+	}
+	return progressStatus{Kind: kind, Message: "No progress yet"}
 }
 
 func (s *server) workspaceDir(workspace string) string {
