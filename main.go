@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"html"
-	"html/template"
 	"image"
 	"image/jpeg"
 	_ "image/png"
@@ -105,6 +104,7 @@ type buildRequest struct {
 type buildResponse struct {
 	Style       magazineStyle `json:"style"`
 	CreativeKit creativeKit   `json:"creativeKit"`
+	Articles    []article     `json:"articles"`
 	Pages       []pagePlan    `json:"pages"`
 	Reference   string        `json:"reference,omitempty"`
 	Workspace   string        `json:"workspace"`
@@ -220,6 +220,7 @@ func main() {
 	mux.HandleFunc("/api/render-page", s.handleRenderPage)
 	mux.HandleFunc("/api/render-template", s.handleRenderTemplate)
 	mux.HandleFunc("/api/write-pdf", s.handleWritePDF)
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	mux.Handle("/work/", http.StripPrefix("/work/", http.FileServer(http.Dir(cfg.WorkDir))))
 	log.Printf("magazine-builder listening on http://localhost%s", cfg.Addr)
 	log.Fatal(http.ListenAndServe(cfg.Addr, mux))
@@ -251,9 +252,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := indexTemplate.Execute(w, nil); err != nil {
-		log.Printf("index template: %v", err)
-	}
+	http.ServeFile(w, r, filepath.Join("static", "index.html"))
 }
 
 func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
@@ -401,7 +400,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		kit = fallbackCreativeKit(req)
 	}
 	s.workspaceLog(workspace, "build: complete")
-	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, Pages: planMagazine(req, style, kit), Workspace: workspace})
+	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, Articles: req.Articles, Pages: planMagazine(req, style, kit), Workspace: workspace})
 }
 
 func (s *server) handleRenderTemplate(w http.ResponseWriter, r *http.Request) {
@@ -1593,131 +1592,3 @@ func jpegData(path string) ([]byte, image.Config, error) {
 	cfg := image.Config{Width: bounds.Dx(), Height: bounds.Dy(), ColorModel: img.ColorModel()}
 	return b.Bytes(), cfg, nil
 }
-
-var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Magazine Builder</title>
-<style>
-:root{color-scheme:light;--ink:#172026;--muted:#667680;--line:#d9e0e5;--panel:#f6f8fa;--accent:#b3261e;--blue:#235789;--paper:#fffdf8;--soft:#edf2f5}*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink);background:linear-gradient(#eef3f6,#e4e9ed)}button,input,select,textarea{font:inherit}button{border:0;border-radius:6px;background:var(--ink);color:white;padding:10px 14px;font-weight:700;cursor:pointer}button.secondary{background:var(--blue)}button.ghost{background:white;color:var(--ink);border:1px solid var(--line)}button:disabled{opacity:.55;cursor:not-allowed}.spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.shell{max-width:1320px;margin:0 auto;padding:28px 22px 44px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}.brand h1{font-size:34px;line-height:1.05;margin:0 0 7px}.brand p{margin:0;color:var(--muted);max-width:650px}.workspace{font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);background:white;border:1px solid var(--line);border-radius:6px;padding:8px 10px}.key-gate{position:fixed;inset:0;z-index:20;background:rgba(232,238,242,.96);display:flex;align-items:center;justify-content:center;padding:20px}.key-gate.hidden{display:none}.key-card{width:min(520px,100%);background:var(--paper);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 70px rgba(26,38,48,.18);padding:22px}.key-card h2{margin:0 0 8px;font-size:24px}.key-card p{color:var(--muted);margin:0 0 16px}.key-actions{display:flex;gap:10px;margin-top:14px}.key-actions button{flex:1}.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.step-pill{border:1px solid var(--line);border-radius:8px;padding:11px 12px;background:white;color:var(--muted);font-weight:700}.step-pill.active{background:var(--ink);border-color:var(--ink);color:white}.wizard{background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 45px rgba(26,38,48,.08);overflow:hidden}.wizard-step{display:none;padding:24px}.wizard-step.active{display:block}.step-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:18px}.step-head h2{font-size:22px;margin:0 0 4px}.step-head p{margin:0;color:var(--muted);max-width:720px}.form-grid{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:16px}.field{margin-bottom:14px}label{display:block;font-weight:700;margin:0 0 6px}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:7px;background:white;padding:10px 11px;color:var(--ink)}textarea{min-height:132px;resize:vertical}.style-box textarea{min-height:230px}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.step-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.status{color:var(--muted);font-size:13px;margin:8px 0 0;min-height:18px}.muted{color:var(--muted);font-size:13px}.article-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.article-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-top:14px}.article{border:1px solid var(--line);background:white;border-radius:8px;padding:12px}.article textarea{min-height:120px}.hidden{display:none!important}.toolbar{display:flex;gap:8px;margin:18px 0 10px;flex-wrap:wrap}.toolbar button{flex:none}.results{margin-top:18px}.grid{display:grid;gap:14px}.top-pair,.spread{display:grid;grid-template-columns:repeat(2,minmax(290px,1fr));gap:12px;align-items:start}.spread{border-top:1px solid var(--line);padding-top:14px}.progress{height:10px;background:#dfe6eb;border-radius:999px;overflow:hidden;margin:10px 0}.progress-bar{height:100%;width:0;background:var(--accent);transition:width .25s ease}.progress-row{margin:10px 0 14px}.page{background:white;border:1px solid var(--line);border-radius:8px;padding:12px;min-height:220px}.page[draggable=true]{cursor:grab}.page.dragging{opacity:.45}.fixed{opacity:.72}.kind{font-size:12px;color:white;background:var(--accent);display:inline-block;border-radius:999px;padding:2px 8px;text-transform:uppercase}.page h3{margin:8px 0;font-size:18px}.prompt{width:100%;min-height:180px;color:#26343c;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f8fafb;border:1px solid var(--line);border-radius:6px;padding:8px;resize:vertical}.template-preview{display:grid;grid-template-columns:minmax(220px,320px) 1fr;gap:14px;align-items:start;background:white;border:1px solid var(--line);border-radius:8px;padding:12px;margin:12px 0}.template-preview img{width:100%;aspect-ratio:1240/1754;object-fit:cover;border:1px solid var(--line);border-radius:6px}.template-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.kit{white-space:pre-wrap;background:white;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:12px}.preview{width:100%;aspect-ratio:1240/1754;object-fit:cover;border:1px solid var(--line);border-radius:6px;background:#f5f7f8;margin:8px 0}.page-status{font-size:12px;color:var(--muted);margin:4px 0 8px}@media(max-width:760px){.shell{padding:18px 12px 32px}.hero{display:block}.brand h1{font-size:28px}.steps{grid-template-columns:1fr 1fr}.form-grid,.article-tools,.top-pair,.spread{grid-template-columns:1fr}.wizard-step{padding:16px}.step-head{display:block}.step-actions{justify-content:stretch}.step-actions button{flex:1}}
-</style>
-</head>
-<body>
-<div id="keyGate" class="key-gate hidden"><div class="key-card"><h2>DEFAPI key required</h2><p>Your key is stored only in this browser via localStorage and sent to this local server for textgen/imagegen calls.</p><label>DEFAPI API key</label><input id="apiKeyInput" type="password" autocomplete="off" placeholder="defapi..."><div class="key-actions"><button id="saveApiKey" class="secondary">Save and Start</button></div><div id="apiKeyStatus" class="status"></div></div></div>
-<div class="shell">
-<header class="hero">
-  <div class="brand">
-    <h1>Magazine Builder</h1>
-    <p>Create a publication style, gather articles, generate a page plan, reorder the issue, then render images and a PDF.</p>
-  </div>
-  <div id="workspaceLabel" class="workspace">No workspace yet</div><button id="changeApiKey" class="ghost">API key</button>
-</header>
-<nav class="steps" aria-label="Wizard steps">
-  <div class="step-pill active" data-step-label="1">1. Style</div>
-  <div class="step-pill" data-step-label="2">2. Articles</div>
-  <div class="step-pill" data-step-label="3">3. Plan</div>
-  <div class="step-pill" data-step-label="4">4. PDF</div>
-</nav>
-<section class="wizard">
-  <div id="wizardStyle" class="wizard-step active">
-    <div class="step-head"><div><h2>Define the publication</h2><p>Name the issue and describe the visual/editorial direction. Textgen will turn this into compact style JSON for the image prompts.</p></div></div>
-    <div class="form-grid">
-      <div class="style-box">
-        <div class="field"><label>Publication title</label><input id="title" value="New Magazine"></div>
-        <div class="field"><label>Style idea</label><textarea id="style" placeholder="e.g. Nordic architecture quarterly, restrained, tactile paper, black and red accents"></textarea></div>
-      </div>
-      <div>
-        <div class="field"><label>Pages</label><select id="pageCount"><option>4</option><option>8</option><option selected>12</option><option>16</option><option>24</option><option>32</option><option>48</option><option>64</option></select></div>
-        <div class="field"><label>Reference image</label><input id="reference" type="file" accept="image/*"></div>
-        <div class="row"><button class="ghost" id="clear">Clear</button></div><div id="styleStatus" class="status">Style will be enhanced when you continue.</div>
-      </div>
-    </div>
-    <div class="step-actions"><button id="toArticles">Next: Articles</button></div>
-  </div>
-  <div id="wizardArticles" class="wizard-step">
-    <div class="step-head"><div><h2>Add article material</h2><p>Import a feed or write articles manually. Imported and manual articles are rewritten into the publication voice before planning.</p></div></div>
-    <div class="article-tools"><div><label>RSS or Atom feed URL</label><input id="rss" placeholder="https://example.com/feed.xml"><div id="rssStatus" class="status"></div></div><button id="importRSS">Import latest</button></div>
-    <div class="toolbar"><button id="generateArticles" class="secondary">Generate Articles</button><button id="addArticle" class="ghost">Add Article</button><button id="addFeature" class="ghost">Add Feature Page</button></div><div id="generateStatus" class="status"></div>
-    <div id="articles" class="article-list"></div>
-    <p class="muted">Manual article text can be rough. It is cleaned and rewritten with textgen when the plan is generated.</p>
-    <div class="step-actions"><button class="ghost" id="backStyle">Back</button><button id="toPlan">Generate Plan</button></div>
-  </div>
-  <div id="wizardPlan" class="wizard-step">
-    <div class="step-head"><div><h2>Review and reorder</h2><p>Drag middle pages to change the running order. The cover and back page stay fixed.</p></div></div>
-    <div id="planToolbar" class="toolbar hidden"><button id="build">Regenerate Plan</button><button id="download" class="ghost">Download JSON</button></div><section id="output" class="results"><div class="kit">Generate a plan to review pages here.</div></section><div class="step-actions"><button class="ghost" id="backArticles">Back</button><button id="toPdf">Next: Render PDF</button></div>
-  </div>
-  <div id="wizardPdf" class="wizard-step">
-    <div class="step-head"><div><h2>Render the issue</h2><p>The app renders the cover, creates a shared content template image, renders the pages, then writes the PDF.</p></div></div>
-    <div id="renderToolbar" class="toolbar hidden"><button id="render" class="secondary">Download PDF</button><button id="downloadPdfJson" class="ghost">Download JSON</button></div><div id="renderStatus" class="status"></div><div id="templateReview"></div><section id="renderOutput" class="results"></section><div class="step-actions"><button class="ghost" id="backPlan">Back</button><button id="renderSide" class="secondary">Download PDF</button></div>
-  </div>
-</section>
-
-</div>
-<script>
-let articles=[];let lastPlan=null;let referencePath='';let workspace='';let apiKey=localStorage.getItem('defapiApiKey')||'';let renderedImages={};let renderedTemplate=null;let templatePrompt='';let draggedIndex=null;let currentStep=1;let busyCount=0;let isRendering=false;
-const $=id=>document.getElementById(id);
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function lockButtons(on){document.body.classList.toggle('busy',on);document.querySelectorAll('button').forEach(b=>{if(on){b.dataset.wasDisabled=b.disabled?'1':'0';b.disabled=true}else{b.disabled=b.dataset.wasDisabled==='1';delete b.dataset.wasDisabled}})}
-async function withBusy(button,msg,fn){if(busyCount>0)return;busyCount++;const old=button?button.innerHTML:'';lockButtons(true);if(button)button.innerHTML='<span class="spinner"></span>'+esc(msg||'Working...');try{return await fn()}finally{if(button)button.innerHTML=old;busyCount--;lockButtons(false)}}
-function requireApiKey(){if(!apiKey){$('keyGate').classList.remove('hidden');return false}$('keyGate').classList.add('hidden');return true}
-function saveApiKey(){const v=$('apiKeyInput').value.trim();if(!v){$('apiKeyStatus').textContent='Enter an API key.';return}apiKey=v;localStorage.setItem('defapiApiKey',apiKey);$('apiKeyInput').value='';$('keyGate').classList.add('hidden')}
-$('saveApiKey').onclick=saveApiKey;$('changeApiKey').onclick=()=>{$('apiKeyInput').value=apiKey;$('keyGate').classList.remove('hidden')};
-function updateWorkspaceLabel(){const el=$('workspaceLabel');if(el)el.innerHTML=workspace?'Workspace: '+esc(workspace)+' · <a href="/work/'+esc(workspace)+'/magazine.log" target="_blank">log</a>':'No workspace yet'}
-function showStep(n){updateWorkspaceLabel();currentStep=n;const pt=$('planToolbar');if(pt)pt.classList.toggle('hidden',n!==3||!lastPlan);const rt=$('renderToolbar');if(rt)rt.classList.toggle('hidden',n!==4||!lastPlan);document.querySelectorAll('.step-pill').forEach(el=>el.classList.toggle('active',+el.dataset.stepLabel===n));[['wizardStyle',1],['wizardArticles',2],['wizardPlan',3],['wizardPdf',4]].forEach(([id,step])=>$(id).classList.toggle('active',step===n));if(n>=3&&lastPlan)renderPlan(lastPlan)}
-async function ensureStyle(){if(!requireApiKey())return false;if($('style').value.trim().startsWith('{'))return true;$('styleStatus').textContent='Enhancing style JSON...';return await enhanceStyle()}
-async function enhanceStyle(){const fd=new FormData();fd.append('apiKey',apiKey);fd.append('title',$('title').value);fd.append('style',$('style').value);fd.append('workspace',workspace);if($('reference').files[0])fd.append('reference',$('reference').files[0]);const res=await fetch('/api/enhance-style',{method:'POST',body:fd});const data=await res.json();if(!res.ok){$('styleStatus').textContent=data.error||'Failed';return false}$('style').value=data.enhancedStyle;referencePath=data.referencePath||referencePath;workspace=data.workspace||workspace;updateWorkspaceLabel();$('styleStatus').textContent=referencePath?'Enhanced with reference image.':'Enhanced.';return true}
-function renderArticles(){
-  const wrap=$('articles');wrap.innerHTML='';
-  articles.forEach((a,i)=>{const div=document.createElement('div');div.className='article';const kind=a.kind||'article';div.innerHTML='<div class="row"><div><label>Type</label><select data-i="'+i+'" data-k="kind"><option value="article" '+(kind==='article'?'selected':'')+'>Article</option><option value="feature" '+(kind==='feature'?'selected':'')+'>Feature page</option></select></div><div><label>Pages</label><input type="number" min="1" max="8" value="'+esc(a.pages||1)+'" data-i="'+i+'" data-k="pages"></div></div><label>Title</label><input value="'+esc(a.title||'')+'" data-i="'+i+'" data-k="title"><label>'+(kind==='feature'?'Feature description':'Body')+'</label><textarea data-i="'+i+'" data-k="body">'+esc(a.body||'')+'</textarea><label>Image URLs, one per line</label><textarea data-i="'+i+'" data-k="images">'+esc((a.images||[]).join('\n'))+'</textarea><button class="ghost" data-remove="'+i+'">Remove</button>';wrap.appendChild(div)});
-  wrap.querySelectorAll('input,textarea,select').forEach(el=>{const update=e=>{const i=+e.target.dataset.i,k=e.target.dataset.k;articles[i][k]=k==='images'?e.target.value.split('\n').map(s=>s.trim()).filter(Boolean):(k==='pages'?Math.max(1,Math.min(8,parseInt(e.target.value||'1',10))):e.target.value);articles[i].enhanced=false;if(k==='kind')renderArticles()};el.oninput=update;el.onchange=update});
-  wrap.querySelectorAll('[data-remove]').forEach(el=>el.onclick=e=>{if(isRendering)return;articles.splice(+e.target.dataset.remove,1);renderArticles()})
-}
-$('toArticles').onclick=e=>withBusy(e.currentTarget,'Preparing...',async()=>{if(await ensureStyle())showStep(2)});
-$('backStyle').onclick=()=>{if(!isRendering)showStep(1)};
-$('backArticles').onclick=()=>{if(!isRendering)showStep(2)};
-$('backPlan').onclick=()=>{if(!isRendering)showStep(3)};
-$('toPlan').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{await buildPlan();if(lastPlan)showStep(3)});
-$('toPdf').onclick=e=>withBusy(e.currentTarget,'Preparing...',()=>startRenderFlow());
-$('addArticle').onclick=()=>{if(isRendering)return;articles.push({kind:'article',title:'',body:'',images:[],pages:1,enhanced:false});renderArticles()};
-$('addFeature').onclick=()=>{if(isRendering)return;articles.push({kind:'feature',title:'',body:'Describe this feature page: comments, crossword, quiz, listings, letters, classifieds, TV program, calendar, chart, etc.',images:[],pages:1,enhanced:false});renderArticles()};
-$('clear').onclick=()=>{if(isRendering)return;$('style').value='';$('reference').value='';referencePath='';workspace='';$('styleStatus').textContent=''};
-$('generateArticles').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{if(!await ensureStyle())return;$('generateStatus').textContent='Writing articles for this publication...';const res=await fetch('/api/generate-articles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,style:$('style').value,count:4,workspace,apiKey})});const data=await res.json();if(!res.ok){$('generateStatus').textContent=data.error||'Failed';return}workspace=data.workspace||workspace;updateWorkspaceLabel();articles=articles.concat((data.articles||[]).map(a=>Object.assign({kind:'article',pages:1},a)));renderArticles();$('generateStatus').textContent='Generated '+(data.articles||[]).length+' articles.'});
-$('importRSS').onclick=e=>withBusy(e.currentTarget,'Importing...',async()=>{if(!await ensureStyle())return;$('rssStatus').textContent='Fetching articles, extracting pages and rewriting...';const res=await fetch('/api/import-rss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:$('rss').value,limit:10,style:$('style').value,workspace,apiKey})});const data=await res.json();if(!res.ok){$('rssStatus').textContent=data.error||'Failed';return}workspace=data.workspace||workspace;updateWorkspaceLabel();articles=articles.concat((data.articles||[]).map(a=>Object.assign({kind:'article',pages:1},a)));renderArticles();$('rssStatus').textContent='Imported '+(data.articles||[]).length+' rewritten articles.'});
-async function buildPlan(){if(!await ensureStyle())return;const payload={title:$('title').value,magazineType:'',style:$('style').value,pageCount:+$('pageCount').value,articles,workspace,apiKey};const out=$('output');out.innerHTML=progressHTML('Planning issue...',8,'planProgress');renderedImages={};setProgress('planProgress',22,'Enhancing articles...');const res=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});setProgress('planProgress',75,'Building page order...');const data=await res.json();if(!res.ok){out.innerHTML='<div class="kit">'+esc(data.error||'Failed')+'</div>';return}lastPlan=data;workspace=data.workspace||workspace;updateWorkspaceLabel();lastPlan.reference=referencePath;templatePrompt=templatePrompt||defaultTemplatePrompt(data.style||{});articles=uniquePlannedArticles(data.pages||[]);renderArticles();setProgress('planProgress',100,'Plan ready.');renderPlan(data)}
-$('build').onclick=e=>withBusy(e.currentTarget,'Generating...',async()=>{await buildPlan();if(lastPlan)showStep(3)});
-$('download').onclick=()=>{if(!lastPlan||isRendering)return;const blob=new Blob([JSON.stringify(lastPlan,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='magazine-plan.json';a.click();URL.revokeObjectURL(a.href)};
-$('render').onclick=e=>withBusy(e.currentTarget,'Preparing...',()=>startRenderFlow());$('renderSide').onclick=e=>withBusy(e.currentTarget,'Preparing...',()=>startRenderFlow());$('downloadPdfJson').onclick=()=>$('download').click();
-function progressHTML(label,pct,id){id=id||'planProgress';return '<div class="progress-row"><div class="status" id="'+id+'Text">'+esc(label)+'</div><div class="progress"><div class="progress-bar" id="'+id+'" style="width:'+pct+'%"></div></div></div>'}
-function setProgress(id,pct,label){const bar=$(id);if(bar)bar.style.width=Math.max(0,Math.min(100,pct))+'%';const text=$(id+'Text')||$(id==='renderProgress'?'renderProgressText':'planProgressText');if(text&&label)text.textContent=label}
-function defaultTemplatePrompt(style){const styleText=style&&style.template?style.template:'blank content-page production dummy with header, folio, grid and image boxes';return 'Create one completely text-free magazine page layout template.\nFORMAT: Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.\nTEMPLATE: '+styleText+'\nShow only generic layout geometry: paper texture, margins, column rhythm, blank header band, blank footer band, empty image rectangles, pale rule lines and subtle placeholder blocks. Absolutely no readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no registration marks, no technical print marks, no UI and no moodboard.'}
-function renderPlan(data){
-  const kit=typeof data.creativeKit==='string'?data.creativeKit:JSON.stringify(data.creativeKit,null,2);
-  const target=(currentStep===4&&$('renderOutput'))?$('renderOutput'):$('output');
-  if(!target)return;
-  target.innerHTML='<div class="kit"><strong>Style JSON</strong>\n'+esc(JSON.stringify(data.style||{},null,2))+'\n\n<strong>Creative kit</strong>\n'+esc(kit)+'</div><div id="pageGrid" class="grid">'+pageGridHTML(data.pages||[])+'</div>';
-  wirePromptEditors();
-  wireTemplateActions();
-  wireDrag();
-}
-function pageGridHTML(pages){const cover=pages[0]?pageHTML(pages[0],0):'';let html='<div class="top-pair">'+cover+templateCardHTML()+'</div>';const rest=pages.slice(1);for(let i=0;i<rest.length;i+=2){html+='<div class="spread">'+pageHTML(rest[i],i+1)+(rest[i+1]?pageHTML(rest[i+1],i+2):'<article class="page fixed"><span class="kind">blank</span><h3>Inside cover</h3><div class="preview"></div></article>')+'</div>'}return html}
-function pageHTML(p,i){const fixed=i===0||i===(lastPlan.pages.length-1);const item=renderedImages[p.number]||null;const img=item?item.image:'';const canDrag=!fixed&&!isRendering;return '<article class="page '+(fixed?'fixed':'')+'" data-i="'+i+'" draggable="'+canDrag+'"><span class="kind">'+esc(p.kind)+'</span><h3>'+p.number+'. '+esc(p.title)+'</h3><div class="page-status" id="status-'+p.number+'">'+(img?'Rendered':(fixed?'Fixed page':(isRendering?'Render locked':'Drag to reorder')))+'</div>'+(img?'<img class="preview" src="'+esc(img)+'">':'<div class="preview"></div>')+'<label>Image prompt</label><textarea class="prompt" data-prompt-i="'+i+'">'+esc(p.prompt)+'</textarea></article>'}
-function templateCardHTML(){const ready=renderedTemplate&&renderedTemplate.publicUrl;const img=renderedTemplate&&renderedTemplate.image?'<img class="preview" src="'+esc(renderedTemplate.image)+'">':'<div class="preview"></div>';const status=ready?'Review before rendering content pages':'Template placeholder, edit prompt before rendering';return '<article class="page fixed"><span class="kind">template</span><h3>Template</h3><div class="page-status">'+status+'</div>'+img+'<label>Template prompt</label><textarea class="prompt" id="templatePrompt">'+esc(templatePrompt||defaultTemplatePrompt(lastPlan&&lastPlan.style||{}))+'</textarea><div class="template-actions"><button id="templateUse" class="secondary" '+(ready?'':'disabled')+'>✓ Use</button><button id="templateRefresh" class="ghost" '+(templatePrompt?'':'disabled')+'>↻ Refresh</button></div></article>'}
-function wireTemplateActions(){const prompt=$('templatePrompt');if(prompt)prompt.oninput=e=>{templatePrompt=e.target.value};const use=$('templateUse');if(use)use.onclick=e=>{if(renderedTemplate&&renderedTemplate.publicUrl)withBusy(e.currentTarget,'Rendering...',()=>renderRemainingPages(renderedTemplate.publicUrl))};const refresh=$('templateRefresh');if(refresh)refresh.onclick=e=>{templatePrompt=$('templatePrompt')?$('templatePrompt').value:templatePrompt;withBusy(e.currentTarget,'Regenerating...',()=>renderTemplateForReview())}}
-function wirePromptEditors(){document.querySelectorAll('[data-prompt-i]').forEach(el=>el.oninput=e=>{const i=+e.target.dataset.promptI;if(lastPlan&&lastPlan.pages[i])lastPlan.pages[i].prompt=e.target.value})}
-function uniquePlannedArticles(pages){const seen=new Set();const out=[];(pages||[]).forEach(p=>{if(!p.article)return;const key=[p.article.kind||'article',p.article.title||'',p.article.body||'',p.article.source||''].join('\u001f');if(seen.has(key))return;seen.add(key);out.push(Object.assign({kind:'article',pages:1},p.article))});return out}
-function wireDrag(){if(isRendering)return;document.querySelectorAll('.page[draggable=true]').forEach(card=>{card.ondragstart=e=>{draggedIndex=+card.dataset.i;card.classList.add('dragging')};card.ondragend=e=>card.classList.remove('dragging');card.ondragover=e=>e.preventDefault();card.ondrop=e=>{e.preventDefault();const target=+card.dataset.i;if(draggedIndex===null||target===0||target===lastPlan.pages.length-1||isRendering)return;movePage(draggedIndex,target)}})}
-function movePage(from,to){const pages=lastPlan.pages;if(isRendering||from===0||from===pages.length-1||to===0||to===pages.length-1)return;const [p]=pages.splice(from,1);pages.splice(to,0,p);renumberPages();renderPlan(lastPlan)}
-function renumberPages(){lastPlan.pages.forEach((p,i)=>{p.number=i+1})}
-async function startRenderFlow(){if(!lastPlan){$('renderStatus').textContent='Generate a plan first.';return}isRendering=true;showStep(4);renderedImages={};renderedTemplate=null;$('templateReview').innerHTML='';$('renderStatus').innerHTML=progressHTML('Rendering cover...',5,'renderProgress');renderPlan(lastPlan);try{setProgress('renderProgress',10,'Rendering cover...');let cover=await renderPage(lastPlan.pages[0], '');renderedImages[1]=cover;setProgress('renderProgress',25,'Rendering template...');renderPlan(lastPlan);await renderTemplateForReview()}catch(e){$('renderStatus').textContent=e.message||'Render failed';isRendering=false;renderPlan(lastPlan)}}
-async function renderTemplateForReview(){setProgress('renderProgress',35,'Rendering shared content template...');const template=await renderTemplate();renderedTemplate=template;const templateRef=template.publicUrl||'';if(!templateRef){$('renderStatus').textContent='Template rendered, but imagegen did not return a public Image URL. Check workspace log.';isRendering=false;renderPlan(lastPlan);return}setProgress('renderProgress',42,'Review the template card beside the cover.');$('templateReview').innerHTML='<p class="muted">Use ✓ or refresh ↻ on the template card.</p>';renderPlan(lastPlan)}
-async function renderRemainingPages(templateRef){try{$('templateReview').innerHTML='';renderedTemplate=null;const middle=lastPlan.pages.slice(1);setProgress('renderProgress',45,'Rendering content pages...');for(let i=0;i<middle.length;i+=3){await Promise.all(middle.slice(i,i+3).map(async p=>{const img=await renderPage(p, templateRef);renderedImages[p.number]=img;renderPlan(lastPlan)}));const done=Math.min(middle.length,i+3);setProgress('renderProgress',45+Math.round((done/Math.max(1,middle.length))*45),'Rendered '+done+' of '+middle.length+' content pages.')}const ordered=lastPlan.pages.map(p=>renderedImages[p.number]&&renderedImages[p.number].image).filter(Boolean);setProgress('renderProgress',94,'Writing PDF...');const res=await fetch('/api/write-pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('title').value,images:ordered,workspace})});const data=await res.json();if(!res.ok){$('renderStatus').textContent=data.error||'PDF failed';return}setProgress('renderProgress',100,'Done. Download should start automatically.');$('renderStatus').insertAdjacentHTML('beforeend','<div class="status"><a href="'+esc(data.pdf)+'" target="_blank">Open PDF</a></div>');const a=document.createElement('a');a.href=data.pdf;a.download='';document.body.appendChild(a);a.click();a.remove()}finally{isRendering=false;renderPlan(lastPlan)}}
-async function renderTemplate(){templatePrompt=$('templatePrompt')?$('templatePrompt').value:templatePrompt;const res=await fetch('/api/render-template',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:lastPlan.style,reference:referencePath,workspace,apiKey,prompt:templatePrompt})});const data=await res.json();if(!res.ok)throw new Error(data.error||'template failed');return {image:data.image,publicUrl:data.publicUrl||''}}
-async function renderPage(page,styleReference){setStatus(page.number,'Rendering...');const ref=page.number===1?referencePath:'';const renderPage=Object.assign({},page,{prompt:finalRenderPrompt(page)});const res=await fetch('/api/render-page',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page:renderPage,styleReference,reference:ref,workspace,apiKey})});const data=await res.json();if(!res.ok){setStatus(page.number,data.error||'Failed');throw new Error(data.error||'render failed')}setStatus(page.number,'Rendered');return {image:data.image,publicUrl:data.publicUrl||''}}
-function finalRenderPrompt(page){const side=page.number%2===0?'left-hand page':'right-hand page';const folioSide=page.number%2===0?'left':'right';return String(page.prompt||'')+'\n\nRENDER POSITION: This is page '+page.number+', a '+side+'. Put page number '+page.number+' on the '+folioSide+' side in the footer.'}
-function setStatus(n,msg){const el=$('status-'+n);if(el)el.textContent=msg}
-renderArticles();updateWorkspaceLabel();showStep(1);requireApiKey();
-</script>
-</body>
-</html>`))
