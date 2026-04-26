@@ -10,6 +10,8 @@ let draggedIndex = null;
 let currentStep = 1;
 let busyCount = 0;
 let isRendering = false;
+let renderCallTotal = 0;
+let renderCallDone = 0;
 const $ = (id) => document.getElementById(id);
 function esc(s) {
   return String(s).replace(
@@ -211,8 +213,8 @@ $("backPlan").onclick = () => {
 };
 $("toPlan").onclick = (e) =>
   withBusy(e.currentTarget, "Generating...", async () => {
+    showStep(3);
     await buildPlan();
-    if (lastPlan) showStep(3);
   });
 $("toPdf").onclick = (e) =>
   withBusy(e.currentTarget, "Preparing...", () => startRenderFlow());
@@ -324,15 +326,31 @@ async function buildPlan() {
     apiKey,
   };
   const out = $("output");
-  out.innerHTML = progressHTML("Planning issue...", 8, "planProgress");
+  const textgenCalls = estimatePlanTextgenCalls();
+  out.innerHTML = progressHTML(
+    "Preparing " + textgenCalls + " textgen call(s)...",
+    8,
+    "planProgress",
+  );
   renderedImages = {};
-  setProgress("planProgress", 22, "Enhancing articles...");
-  const res = await fetch("/api/build", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  setProgress("planProgress", 75, "Building page order...");
+  const progressTimer = startEstimatedCallProgress(
+    "planProgress",
+    textgenCalls,
+    "Textgen",
+    10,
+    88,
+  );
+  let res;
+  try {
+    res = await fetch("/api/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } finally {
+    clearInterval(progressTimer);
+  }
+  setProgress("planProgress", 90, "Building page order...");
   const data = await res.json();
   if (!res.ok) {
     out.innerHTML =
@@ -393,6 +411,44 @@ function setProgress(id, pct, label) {
     $(id + "Text") ||
     $(id === "renderProgress" ? "renderProgressText" : "planProgressText");
   if (text && label) text.textContent = label;
+}
+function estimatePlanTextgenCalls() {
+  return 1 + articles.filter((a) => !a.enhanced).length;
+}
+function startEstimatedCallProgress(id, total, label, startPct, endPct) {
+  total = Math.max(1, total);
+  let tick = 0;
+  setProgress(id, startPct, label + " call 1 of " + total + "...");
+  return setInterval(() => {
+    tick++;
+    const estimatedCall = Math.min(total, Math.floor(tick / 8) + 1);
+    const pct =
+      startPct +
+      Math.min(0.95, tick / Math.max(8, total * 8)) * (endPct - startPct);
+    setProgress(
+      id,
+      Math.round(pct),
+      label + " call " + estimatedCall + " of " + total + "...",
+    );
+  }, 1000);
+}
+function setRenderProgress(label) {
+  const next = Math.min(renderCallTotal, renderCallDone + 1);
+  const pct = Math.round((renderCallDone / Math.max(1, renderCallTotal)) * 100);
+  setProgress(
+    "renderProgress",
+    pct,
+    label + " (external call " + next + " of " + renderCallTotal + ")...",
+  );
+}
+function completeRenderCall(label) {
+  renderCallDone = Math.min(renderCallTotal, renderCallDone + 1);
+  const pct = Math.round((renderCallDone / Math.max(1, renderCallTotal)) * 100);
+  setProgress(
+    "renderProgress",
+    pct,
+    label + " (" + renderCallDone + " of " + renderCallTotal + " complete)",
+  );
 }
 function defaultTemplatePrompt(style) {
   const styleText =
@@ -579,9 +635,16 @@ function templateCardHTML() {
     '</textarea><div class="template-actions"><button id="templateUse" class="secondary" ' +
     (ready ? "" : "disabled") +
     '>✓ Use</button><button id="templateRefresh" class="ghost" ' +
-    (templatePrompt ? "" : "disabled") +
+    (lastPlan ? "" : "disabled") +
     ">↻ Refresh</button></div></article>"
   );
+}
+function getTemplatePrompt() {
+  const prompt = $("templatePrompt");
+  return prompt
+    ? prompt.value
+    : templatePrompt ||
+        defaultTemplatePrompt((lastPlan && lastPlan.style) || {});
 }
 function wireTemplateActions() {
   const prompt = $("templatePrompt");
@@ -592,6 +655,8 @@ function wireTemplateActions() {
   const use = $("templateUse");
   if (use)
     use.onclick = (e) => {
+      e.preventDefault();
+      templatePrompt = getTemplatePrompt();
       if (renderedTemplate && renderedTemplate.publicUrl)
         withBusy(e.currentTarget, "Rendering...", () =>
           renderRemainingPages(renderedTemplate.publicUrl),
@@ -600,9 +665,10 @@ function wireTemplateActions() {
   const refresh = $("templateRefresh");
   if (refresh)
     refresh.onclick = (e) => {
-      templatePrompt = $("templatePrompt")
-        ? $("templatePrompt").value
-        : templatePrompt;
+      e.preventDefault();
+      templatePrompt = getTemplatePrompt();
+      renderedTemplate = null;
+      renderPlan(lastPlan);
       withBusy(e.currentTarget, "Regenerating...", () =>
         renderTemplateForReview(),
       );
@@ -726,17 +792,20 @@ async function startRenderFlow() {
   renderedImages = {};
   renderedTemplate = null;
   $("templateReview").innerHTML = "";
+  renderCallTotal = 2 + Math.max(0, lastPlan.pages.length - 1) + 1;
+  renderCallDone = 0;
   $("renderStatus").innerHTML = progressHTML(
-    "Rendering cover...",
-    5,
+    "Starting imagegen call 1 of " + renderCallTotal + "...",
+    1,
     "renderProgress",
   );
   renderPlan(lastPlan);
   try {
-    setProgress("renderProgress", 10, "Rendering cover...");
+    setRenderProgress("Rendering cover");
     let cover = await renderPage(lastPlan.pages[0], "");
     renderedImages[1] = cover;
-    setProgress("renderProgress", 25, "Rendering template...");
+    completeRenderCall("Cover rendered");
+    setRenderProgress("Rendering template");
     renderPlan(lastPlan);
     await renderTemplateForReview();
   } catch (e) {
@@ -746,8 +815,9 @@ async function startRenderFlow() {
   }
 }
 async function renderTemplateForReview() {
-  setProgress("renderProgress", 35, "Rendering shared content template...");
+  setRenderProgress("Rendering shared content template");
   const template = await renderTemplate();
+  completeRenderCall("Template rendered");
   renderedTemplate = template;
   const templateRef = template.publicUrl || "";
   if (!templateRef) {
@@ -757,11 +827,7 @@ async function renderTemplateForReview() {
     renderPlan(lastPlan);
     return;
   }
-  setProgress(
-    "renderProgress",
-    42,
-    "Review the template card beside the cover.",
-  );
+  setRenderProgress("Review the template card beside the cover.");
   $("templateReview").innerHTML =
     '<p class="muted">Use ✓ or refresh ↻ on the template card.</p>';
   renderPlan(lastPlan);
@@ -771,26 +837,23 @@ async function renderRemainingPages(templateRef) {
     $("templateReview").innerHTML = "";
     renderedTemplate = null;
     const middle = lastPlan.pages.slice(1);
-    setProgress("renderProgress", 45, "Rendering content pages...");
+    setRenderProgress("Rendering content pages");
     for (let i = 0; i < middle.length; i += 3) {
       await Promise.all(
         middle.slice(i, i + 3).map(async (p) => {
+          setStatus(p.number, "Imagegen call queued...");
           const img = await renderPage(p, templateRef);
           renderedImages[p.number] = img;
+          completeRenderCall("Rendered page " + p.number);
           renderPlan(lastPlan);
         }),
       );
-      const done = Math.min(middle.length, i + 3);
-      setProgress(
-        "renderProgress",
-        45 + Math.round((done / Math.max(1, middle.length)) * 45),
-        "Rendered " + done + " of " + middle.length + " content pages.",
-      );
+      setRenderProgress("Rendering content pages");
     }
     const ordered = lastPlan.pages
       .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
       .filter(Boolean);
-    setProgress("renderProgress", 94, "Writing PDF...");
+    setRenderProgress("Writing PDF");
     const res = await fetch("/api/write-pdf", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -805,6 +868,7 @@ async function renderRemainingPages(templateRef) {
       $("renderStatus").textContent = data.error || "PDF failed";
       return;
     }
+    completeRenderCall("PDF ready");
     setProgress(
       "renderProgress",
       100,
@@ -828,9 +892,7 @@ async function renderRemainingPages(templateRef) {
   }
 }
 async function renderTemplate() {
-  templatePrompt = $("templatePrompt")
-    ? $("templatePrompt").value
-    : templatePrompt;
+  templatePrompt = getTemplatePrompt();
   const res = await fetch("/api/render-template", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -874,8 +936,7 @@ async function renderPage(page, styleReference) {
 function finalRenderPrompt(page) {
   const side = page.number % 2 === 0 ? "left-hand page" : "right-hand page";
   const folioSide = page.number % 2 === 0 ? "left" : "right";
-  return (
-    String(page.prompt || "") +
+  let extra =
     "\n\nRENDER POSITION: This is page " +
     page.number +
     ", a " +
@@ -884,7 +945,26 @@ function finalRenderPrompt(page) {
     page.number +
     " on the " +
     folioSide +
-    " side in the footer."
+    " side in the footer.";
+  if (page.kind === "cover") {
+    extra +=
+      "\nCOVER CONTENTS: Use cover lines for the actual final page order: " +
+      coverLinePages() +
+      ". These page numbers are final after reordering.";
+  }
+  return String(page.prompt || "") + extra;
+}
+function coverLinePages() {
+  if (!lastPlan || !lastPlan.pages) return "inside stories";
+  return (
+    lastPlan.pages
+      .filter((p) => p.number > 1 && p.kind !== "back-page")
+      .filter(
+        (p) => p.title && p.title !== "Advert" && p.title !== "Departments",
+      )
+      .slice(0, 7)
+      .map((p) => "p" + p.number + " " + p.title)
+      .join("; ") || "inside stories"
   );
 }
 function setStatus(n, msg) {

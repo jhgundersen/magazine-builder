@@ -932,7 +932,7 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []page
 }
 
 func coverPrompt(title, magType string, style magazineStyle, articles []article) string {
-	return limitPrompt(fmt.Sprintf("Create the cover of %q, a %s.\n%s\nSTYLE: %s\nCOVER STYLE: %s\nUse cover lines for: %s\nInclude masthead, issue date, price/barcode or equivalent furniture, strong hierarchy, and avoid: %s.", title, magType, pageFormatInstruction(), styleLine(style, "core"), style.Cover, articleTitles(articles, 6), style.Avoid), 3900)
+	return limitPrompt(fmt.Sprintf("Create the cover of %q, a %s.\n%s\nSTYLE: %s\nCOVER STYLE: %s\nInclude masthead, issue date, price/barcode or equivalent furniture, strong hierarchy, and avoid: %s. Cover-line story references and final page numbers are added at render time after page ordering is finished.", title, magType, pageFormatInstruction(), styleLine(style, "core"), style.Cover, style.Avoid), 3900)
 }
 
 func articlePrompt(n int, title string, style magazineStyle, modules, kind string, a article, part, totalParts int) string {
