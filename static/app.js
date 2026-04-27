@@ -126,6 +126,7 @@ function showStep(n) {
 }
 async function ensureStyle() {
   if (!requireApiKey()) return false;
+  referencePath = $("reference").value.trim();
   if ($("style").value.trim().startsWith("{")) return true;
   $("styleStatus").textContent = "Enhancing style JSON...";
   return await enhanceStyle();
@@ -136,7 +137,7 @@ async function enhanceStyle() {
   fd.append("title", $("title").value);
   fd.append("style", $("style").value);
   fd.append("workspace", workspace);
-  if ($("reference").files[0]) fd.append("reference", $("reference").files[0]);
+  fd.append("reference", $("reference").value.trim());
   const res = await fetch("/api/enhance-style", { method: "POST", body: fd });
   const data = await res.json();
   if (!res.ok) {
@@ -269,6 +270,28 @@ $("clear").onclick = () => {
   workspace = "";
   $("styleStatus").textContent = "";
 };
+$("planFile").onchange = (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file || isRendering) return;
+  const reader = new FileReader();
+  $("importStatus").textContent = "Reading plan JSON...";
+  reader.onload = () => {
+    try {
+      importPlanJSON(JSON.parse(String(reader.result || "")));
+      $("importStatus").textContent = "Plan loaded.";
+      showStep(3);
+    } catch (err) {
+      $("importStatus").textContent = err.message || "Could not load JSON.";
+    } finally {
+      e.target.value = "";
+    }
+  };
+  reader.onerror = () => {
+    $("importStatus").textContent = "Could not read file.";
+    e.target.value = "";
+  };
+  reader.readAsText(file);
+};
 $("generateArticles").onclick = (e) =>
   withBusy(e.currentTarget, "Generating...", async () => {
     if (!(await ensureStyle())) return;
@@ -346,9 +369,9 @@ async function buildPlan() {
     apiKey,
   };
   const out = $("output");
-  const textgenCalls = estimatePlanTextgenCalls();
+  const defapiTextCalls = estimatePlanDefapiTextCalls();
   out.innerHTML = progressHTML(
-    "Waiting for " + textgenCalls + " textgen call(s)...",
+    "Waiting for " + defapiTextCalls + " defapi text call(s)...",
     8,
     "planProgress",
   );
@@ -400,7 +423,7 @@ $("build").onclick = (e) =>
   });
 $("download").onclick = () => {
   if (!lastPlan || isRendering) return;
-  const blob = new Blob([JSON.stringify(lastPlan, null, 2)], {
+  const blob = new Blob([JSON.stringify(exportPlanJSON(), null, 2)], {
     type: "application/json",
   });
   const a = document.createElement("a");
@@ -409,6 +432,73 @@ $("download").onclick = () => {
   a.click();
   URL.revokeObjectURL(a.href);
 };
+function exportPlanJSON() {
+  return Object.assign({}, lastPlan, {
+    title: $("title").value,
+    pageCount: lastPlan && lastPlan.pages ? lastPlan.pages.length : 0,
+    reference: referencePath,
+    templatePrompt,
+    workspace,
+  });
+}
+function importPlanJSON(raw) {
+  const data = normalizeImportedPlan(raw);
+  lastPlan = data;
+  workspace = data.workspace || "";
+  referencePath = data.reference || data.referencePath || "";
+  templatePrompt =
+    data.templatePrompt || defaultTemplatePrompt((data && data.style) || {});
+  renderedImages = {};
+  renderedTemplate = null;
+  isRendering = false;
+  if (data.title || (data.style && data.style.name)) {
+    $("title").value = data.title || data.style.name;
+  }
+  if (data.style) {
+    $("style").value = JSON.stringify(data.style, null, 2);
+  }
+  if (data.pages && data.pages.length) {
+    $("pageCount").value = String(data.pages.length);
+  }
+  $("reference").value = referencePath;
+  articles = (
+    data.articles && data.articles.length
+      ? data.articles
+      : uniquePlannedArticles(data.pages)
+  ).map((a) => Object.assign({ kind: "article", pages: 1 }, a));
+  renumberPages();
+  renderArticles();
+  updateWorkspaceLabel();
+}
+function normalizeImportedPlan(raw) {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("The JSON file does not contain a plan.");
+  }
+  const data = raw.plan && typeof raw.plan === "object" ? raw.plan : raw;
+  if (!Array.isArray(data.pages) || data.pages.length < 2) {
+    throw new Error("The JSON file is missing planned pages.");
+  }
+  data.pages = data.pages.map((p, i) =>
+    Object.assign(
+      {
+        number: i + 1,
+        kind:
+          i === 0
+            ? "cover"
+            : i === data.pages.length - 1
+              ? "back-page"
+              : "article",
+        title: "Untitled",
+        prompt: "",
+      },
+      p,
+    ),
+  );
+  data.style = data.style || {};
+  data.creativeKit = data.creativeKit || {};
+  data.articles = Array.isArray(data.articles) ? data.articles : [];
+  return data;
+}
 $("render").onclick = (e) =>
   withBusy(e.currentTarget, "Preparing...", () => startRenderFlow());
 $("renderSide").onclick = (e) =>
@@ -436,7 +526,7 @@ function setProgress(id, pct, label) {
     $(id === "renderProgress" ? "renderProgressText" : "planProgressText");
   if (text && label) text.textContent = label;
 }
-function estimatePlanTextgenCalls() {
+function estimatePlanDefapiTextCalls() {
   return 1 + articles.filter((a) => !a.enhanced).length;
 }
 function startProgressPolling(workspaceId, kind, progressId) {
@@ -814,7 +904,7 @@ async function startRenderFlow() {
   renderCallTotal = 2 + Math.max(0, lastPlan.pages.length - 1) + 1;
   renderCallDone = 0;
   $("renderStatus").innerHTML = progressHTML(
-    "Starting imagegen call 1 of " + renderCallTotal + "...",
+    "Starting defapi image call 1 of " + renderCallTotal + "...",
     1,
     "renderProgress",
   );
@@ -841,7 +931,7 @@ async function renderTemplateForReview() {
   const templateRef = template.publicUrl || "";
   if (!templateRef) {
     $("renderStatus").textContent =
-      "Template rendered, but imagegen did not return a public Image URL. Check workspace log.";
+      "Template rendered, but defapi image did not return a public Image URL. Check workspace log.";
     isRendering = false;
     renderPlan(lastPlan);
     return;
@@ -860,7 +950,7 @@ async function renderRemainingPages(templateRef) {
     for (let i = 0; i < middle.length; i += 3) {
       await Promise.all(
         middle.slice(i, i + 3).map(async (p) => {
-          setStatus(p.number, "Imagegen call queued...");
+          setStatus(p.number, "Defapi image call queued...");
           const img = await renderPage(p, templateRef);
           renderedImages[p.number] = img;
           completeRenderCall("Rendered page " + p.number);
@@ -872,6 +962,14 @@ async function renderRemainingPages(templateRef) {
     const ordered = lastPlan.pages
       .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
       .filter(Boolean);
+    if (ordered.length !== lastPlan.pages.length) {
+      throw new Error(
+        "Missing rendered pages: expected " +
+          lastPlan.pages.length +
+          ", got " +
+          ordered.length,
+      );
+    }
     setRenderProgress("Writing PDF");
     const res = await fetch("/api/write-pdf", {
       method: "POST",

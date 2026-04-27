@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -17,7 +15,6 @@ import (
 	_ "image/png"
 	"io"
 	"log"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,20 +29,22 @@ import (
 )
 
 type config struct {
-	Addr                   string
-	WorkDir                string
-	TextgenCmd             string
-	TextgenModel           string
-	TextgenTimeout         time.Duration
-	ImagegenCmd            string
-	ImagegenModel          string
-	ImagegenTimeout        time.Duration
-	ImagegenFormat         string
-	ImagegenSize           string
-	ImagegenQuality        string
-	ImagegenBackground     string
-	ImagegenMaxPromptChars int
-	ImagegenRetries        int
+	Addr                      string
+	WorkDir                   string
+	DefapiTextCmd             string
+	DefapiTextCategory        string
+	DefapiTextModel           string
+	DefapiTextTimeout         time.Duration
+	DefapiImageCmd            string
+	DefapiImageCategory       string
+	DefapiImageModel          string
+	DefapiImageTimeout        time.Duration
+	DefapiImageFormat         string
+	DefapiImageSize           string
+	DefapiImageQuality        string
+	DefapiImageBackground     string
+	DefapiImageMaxPromptChars int
+	DefapiImageRetries        int
 }
 
 type server struct {
@@ -193,16 +192,25 @@ type pdfResponse struct {
 
 type rssFeed struct {
 	Channel struct {
-		Items []rssItem `xml:"item"`
+		Items         []rssItem `xml:"item"`
+		PodcastMedium string    `xml:"https://podcastindex.org/namespace/1.0 medium"`
 	} `xml:"channel"`
 	Entries []atomEntry `xml:"entry"`
 }
 
 type rssItem struct {
-	Title       string `xml:"title"`
-	Link        string `xml:"link"`
-	Description string `xml:"description"`
-	Content     string `xml:"encoded"`
+	Title              string              `xml:"title"`
+	Link               string              `xml:"link"`
+	Description        string              `xml:"description"`
+	Content            string              `xml:"encoded"`
+	Enclosure          rssEnclosure        `xml:"enclosure"`
+	PodcastTranscripts []podcastTranscript `xml:"https://podcastindex.org/namespace/1.0 transcript"`
+	PodcastChapters    podcastChapters     `xml:"https://podcastindex.org/namespace/1.0 chapters"`
+	PodcastSeason      podcastValue        `xml:"https://podcastindex.org/namespace/1.0 season"`
+	PodcastEpisode     podcastValue        `xml:"https://podcastindex.org/namespace/1.0 episode"`
+	ItunesSeason       string              `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd season"`
+	ItunesEpisode      string              `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd episode"`
+	ItunesImage        imageHref           `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd image"`
 }
 
 type atomEntry struct {
@@ -214,6 +222,32 @@ type atomEntry struct {
 
 type atomLink struct {
 	Href string `xml:"href,attr"`
+}
+
+type rssEnclosure struct {
+	URL  string `xml:"url,attr"`
+	Type string `xml:"type,attr"`
+}
+
+type imageHref struct {
+	Href string `xml:"href,attr"`
+}
+
+type podcastTranscript struct {
+	URL      string `xml:"url,attr"`
+	Type     string `xml:"type,attr"`
+	Language string `xml:"language,attr"`
+}
+
+type podcastChapters struct {
+	URL  string `xml:"url,attr"`
+	Type string `xml:"type,attr"`
+}
+
+type podcastValue struct {
+	Value   string `xml:",chardata"`
+	Name    string `xml:"name,attr"`
+	Display string `xml:"display,attr"`
 }
 
 func main() {
@@ -232,7 +266,7 @@ func main() {
 	mux.HandleFunc("/api/render-template", s.handleRenderTemplate)
 	mux.HandleFunc("/api/write-pdf", s.handleWritePDF)
 	mux.HandleFunc("/api/progress", s.handleProgress)
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	mux.Handle("/static/", http.StripPrefix("/static/", noCache(http.FileServer(http.Dir("static")))))
 	mux.Handle("/work/", http.StripPrefix("/work/", http.FileServer(http.Dir(cfg.WorkDir))))
 	log.Printf("magazine-builder listening on http://localhost%s", cfg.Addr)
 	log.Fatal(http.ListenAndServe(cfg.Addr, mux))
@@ -242,18 +276,20 @@ func parseFlags() config {
 	cfg := config{}
 	flag.StringVar(&cfg.Addr, "addr", ":8080", "HTTP listen address")
 	flag.StringVar(&cfg.WorkDir, "workdir", "magazine-work", "directory for uploads and generated artifacts")
-	flag.StringVar(&cfg.TextgenCmd, "textgen", "textgen", "textgen command")
-	flag.StringVar(&cfg.TextgenModel, "textgen-model", "claude", "textgen model subcommand")
-	flag.DurationVar(&cfg.TextgenTimeout, "textgen-timeout", 90*time.Second, "textgen timeout")
-	flag.StringVar(&cfg.ImagegenCmd, "imagegen", "imagegen", "imagegen command")
-	flag.StringVar(&cfg.ImagegenModel, "imagegen-model", "gpt2", "imagegen model subcommand")
-	flag.DurationVar(&cfg.ImagegenTimeout, "imagegen-timeout", 20*time.Minute, "imagegen timeout per page")
-	flag.StringVar(&cfg.ImagegenFormat, "imagegen-format", "jpeg", "imagegen output format")
-	flag.StringVar(&cfg.ImagegenSize, "imagegen-size", "auto", "imagegen output size")
-	flag.StringVar(&cfg.ImagegenQuality, "imagegen-quality", "high", "imagegen output quality")
-	flag.StringVar(&cfg.ImagegenBackground, "imagegen-background", "opaque", "imagegen background")
-	flag.IntVar(&cfg.ImagegenMaxPromptChars, "imagegen-max-prompt-chars", 4000, "maximum imagegen prompt length")
-	flag.IntVar(&cfg.ImagegenRetries, "imagegen-retries", 2, "retry attempts for failed imagegen calls")
+	flag.StringVar(&cfg.DefapiTextCmd, "defapi-text", "defapi", "defapi text command")
+	flag.StringVar(&cfg.DefapiTextCategory, "defapi-text-category", "text", "defapi text category")
+	flag.StringVar(&cfg.DefapiTextModel, "defapi-text-model", "claude", "defapi text model")
+	flag.DurationVar(&cfg.DefapiTextTimeout, "defapi-text-timeout", 90*time.Second, "defapi text timeout")
+	flag.StringVar(&cfg.DefapiImageCmd, "defapi-image", "defapi", "defapi image command")
+	flag.StringVar(&cfg.DefapiImageCategory, "defapi-image-category", "image", "defapi image category")
+	flag.StringVar(&cfg.DefapiImageModel, "defapi-image-model", "gpt2", "defapi image model")
+	flag.DurationVar(&cfg.DefapiImageTimeout, "defapi-image-timeout", 20*time.Minute, "defapi image timeout per page")
+	flag.StringVar(&cfg.DefapiImageFormat, "defapi-image-format", "jpeg", "defapi image output format")
+	flag.StringVar(&cfg.DefapiImageSize, "defapi-image-size", "auto", "defapi image output size")
+	flag.StringVar(&cfg.DefapiImageQuality, "defapi-image-quality", "high", "defapi image output quality")
+	flag.StringVar(&cfg.DefapiImageBackground, "defapi-image-background", "opaque", "defapi image background")
+	flag.IntVar(&cfg.DefapiImageMaxPromptChars, "defapi-image-max-prompt-chars", 4000, "maximum defapi image prompt length")
+	flag.IntVar(&cfg.DefapiImageRetries, "defapi-image-retries", 2, "retry attempts for failed defapi image calls")
 	flag.Parse()
 	return cfg
 }
@@ -263,8 +299,16 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	http.ServeFile(w, r, filepath.Join("static", "index.html"))
+}
+
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
@@ -284,14 +328,14 @@ func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	referencePath, err := s.saveUpload(workspace, r.MultipartForm, "reference")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	referencePath := strings.TrimSpace(r.FormValue("reference"))
+	if referencePath != "" && defapiImageRef(referencePath) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("reference must be a public http(s) image URL"))
 		return
 	}
 	enhanced, err := s.enhanceStyle(ctx, title, style, referencePath)
 	if err != nil {
-		log.Printf("textgen style enhancement failed: %v", err)
+		log.Printf("defapi text style enhancement failed: %v", err)
 		enhanced = fallbackStyle(style, referencePath)
 	}
 	if title != "" {
@@ -327,9 +371,19 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 	}
 	style := parseStyle(req.Style)
 	for i := range articles {
+		if articles[i].Kind == "podcast" && len([]rune(articles[i].Body)) > 3500 {
+			summarized, err := s.summarizePodcastForImport(ctx, articles[i], style)
+			if err != nil {
+				log.Printf("defapi text podcast summary failed for %q: %v", articles[i].Title, err)
+				articles[i].Body = sampleLongText(articles[i].Body, 3200)
+			} else {
+				articles[i].Title = summarized.Title
+				articles[i].Body = summarized.Body
+			}
+		}
 		improved, err := s.rewriteArticleForStyle(ctx, articles[i], style)
 		if err != nil {
-			log.Printf("textgen article rewrite failed for %q: %v", articles[i].Title, err)
+			log.Printf("defapi text article rewrite failed for %q: %v", articles[i].Title, err)
 			continue
 		}
 		articles[i].Title = improved.Title
@@ -393,7 +447,13 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	done := 0
-	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Starting textgen work", Running: true})
+	completed := false
+	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Starting defapi text work", Running: true})
+	defer func() {
+		if !completed {
+			s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Build interrupted or failed", Running: false})
+		}
+	}()
 	s.workspaceLog(workspace, "build: start title=%q articles=%d pages=%d", req.Title, len(req.Articles), req.PageCount)
 	for i := range req.Articles {
 		if req.Articles[i].Enhanced {
@@ -408,7 +468,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 			improved, err = s.rewriteArticleForStyle(ctx, req.Articles[i], style)
 		}
 		if err != nil {
-			log.Printf("textgen manual article rewrite failed for %q: %v", req.Articles[i].Title, err)
+			log.Printf("defapi text manual article rewrite failed for %q: %v", req.Articles[i].Title, err)
 			done++
 			s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewrite failed for %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
 			continue
@@ -421,12 +481,13 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Generating creative kit", Running: true})
 	kit, err := s.generateCreativeKit(ctx, req, style)
 	if err != nil {
-		log.Printf("textgen creative kit failed: %v", err)
+		log.Printf("defapi text creative kit failed: %v", err)
 		s.workspaceLog(workspace, "build: creative kit failed: %v", err)
 		kit = fallbackCreativeKit(req)
 	}
 	done++
 	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Plan ready", Running: false})
+	completed = true
 	s.workspaceLog(workspace, "build: complete")
 	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, Articles: req.Articles, Pages: planMagazine(req, style, kit), Workspace: workspace})
 }
@@ -457,14 +518,14 @@ func (s *server) handleRenderTemplate(w http.ResponseWriter, r *http.Request) {
 	if prompt == "" {
 		prompt = defaultTemplatePrompt(req.Style)
 	}
-	prompt = limitPrompt(prompt, s.cfg.ImagegenMaxPromptChars)
+	prompt = limitPrompt(prompt, s.cfg.DefapiImageMaxPromptChars)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Style.Name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	s.workspaceLog(workspace, "render-template: start")
-	image, err := s.runImagegenWithRetry(ctx, workspace, 0, prompt, filterStrings([]string{req.Reference}), true)
+	image, err := s.runDefapiImageWithRetry(ctx, workspace, 0, prompt, filterStrings([]string{req.Reference}), true)
 	if err != nil {
 		s.workspaceLog(workspace, "render-template: failed: %v", err)
 		writeError(w, http.StatusBadGateway, err)
@@ -493,7 +554,7 @@ func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.workspaceLog(workspace, "render-page: start page=%d title=%q refs=%d", req.Page.Number, req.Page.Title, len(images))
-	image, err := s.runImagegenWithRetry(ctx, workspace, req.Page.Number, limitPrompt(req.Page.Prompt, s.cfg.ImagegenMaxPromptChars), images, false)
+	image, err := s.runDefapiImageWithRetry(ctx, workspace, req.Page.Number, limitPrompt(req.Page.Prompt, s.cfg.DefapiImageMaxPromptChars), images, false)
 	if err != nil {
 		s.workspaceLog(workspace, "render-page: failed page=%d: %v", req.Page.Number, err)
 		writeError(w, http.StatusBadGateway, err)
@@ -539,35 +600,6 @@ func (s *server) handleWritePDF(w http.ResponseWriter, r *http.Request) {
 	}
 	s.workspaceLog(workspace, "write-pdf: complete %s", s.workspaceURL(workspace, "renders/"+name))
 	writeJSON(w, pdfResponse{PDF: s.workspaceURL(workspace, "renders/"+name)})
-}
-
-func (s *server) saveUpload(workspace string, form *multipart.Form, name string) (string, error) {
-	if form == nil || form.File == nil || len(form.File[name]) == 0 {
-		return "", nil
-	}
-	file, err := form.File[name][0].Open()
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, 12<<20))
-	if err != nil {
-		return "", err
-	}
-	if len(data) == 0 {
-		return "", nil
-	}
-	sum := sha1.Sum(data)
-	ext := strings.ToLower(filepath.Ext(form.File[name][0].Filename))
-	if ext == "" || len(ext) > 8 {
-		ext = ".bin"
-	}
-	filename := hex.EncodeToString(sum[:]) + ext
-	path := filepath.Join(s.workspaceDir(workspace), "uploads", filename)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", err
-	}
-	return s.workspaceURL(workspace, "uploads/"+filename), nil
 }
 
 func (s *server) ensureWorkspace(workspace, title string) (string, error) {
@@ -664,9 +696,9 @@ func newWorkspaceID(title string) string {
 func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath string) (magazineStyle, error) {
 	prompt := "Return only valid compact JSON for a reusable magazine/newspaper style. No markdown. Keep each field under 220 characters so later image prompts stay under 4000 chars. Required keys: name, core, cover, content, feature, short, advert, filler, back, template, typography, color, print, avoid. The name field must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". Define different guidance for cover, normal content pages, feature articles, short articles, adverts, filler/departments, back page, and a completely text-free blank content template image. The template field must describe only generic layout shapes, margins, empty image areas and grid rhythm, with no letters, masthead, captions, labels, technical print marks or readable text.\n\nUser style:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
 	if referencePath != "" {
-		prompt += "\n\nA reference image was uploaded. Infer palette, typography mood, texture and layout feeling from it, but describe the reusable style in words."
+		prompt += "\n\nReference image URL: " + referencePath + "\nUse this URL as visual inspiration for palette, typography mood, texture and layout feeling, but describe the reusable style in words."
 	}
-	text, err := s.runTextgen(ctx, prompt, 1200)
+	text, err := s.runDefapiText(ctx, prompt, 1200)
 	if err != nil {
 		return magazineStyle{}, err
 	}
@@ -679,7 +711,7 @@ func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath s
 
 func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, style magazineStyle) (creativeKit, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, captions, backPage. Make departments, sidebars and captions arrays of 18-24 unique short strings each. Make adverts and backPage arrays of 10-16 unique short strings each. Every string must describe one specific reusable page element, never a duplicate or near-duplicate. Prepare issue-wide generic page elements for a %s called %q. Match this style: %s. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), articleList(req.Articles))
-	text, err := s.runTextgen(ctx, prompt, 1800)
+	text, err := s.runDefapiText(ctx, prompt, 1800)
 	if err != nil {
 		return creativeKit{}, err
 	}
@@ -692,7 +724,7 @@ func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, styl
 
 func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Rewrite this imported web article into print-ready magazine copy matching the style. Keep facts and names, remove web/navigation language, remove links, embeds, YouTube mentions, newsletter prompts and SEO clutter. Title should fit the publication voice. Body should be 900-1600 characters, in coherent paragraphs, ready for page layout.\n\nSTYLE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s", styleLine(style, "article"), a.Title, compact(a.Body, 3200))
-	text, err := s.runTextgen(ctx, prompt, 1000)
+	text, err := s.runDefapiText(ctx, prompt, 1000)
 	if err != nil {
 		return a, err
 	}
@@ -713,9 +745,31 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 	return a, nil
 }
 
+func (s *server) summarizePodcastForImport(ctx context.Context, a article, style magazineStyle) (article, error) {
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Summarize this podcast episode source material into print-editorial notes for a later magazine article rewrite. Preserve concrete facts, people, works, chronology, arguments, opinions and useful chapter structure. Do not mention transcripts, timestamps, RSS, show notes or source mechanics. Title should be a concise episode/article title. Body should be 1400-2200 characters, factual and balanced, not finished prose.\n\nSTYLE CONTEXT: %s\n\nEPISODE TITLE: %s\nSOURCE MATERIAL SAMPLE:\n%s", styleLine(style, "article"), a.Title, sampleLongText(a.Body, 12000))
+	text, err := s.runDefapiText(ctx, prompt, 1200)
+	if err != nil {
+		return a, err
+	}
+	var out struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(extractJSONObject(text)), &out); err != nil {
+		return a, err
+	}
+	if strings.TrimSpace(out.Title) != "" {
+		a.Title = cleanText(out.Title)
+	}
+	if strings.TrimSpace(out.Body) != "" {
+		a.Body = cleanText(out.Body)
+	}
+	return a, nil
+}
+
 func (s *server) rewriteFeatureForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Turn this requested magazine feature page into a precise image-generation brief matching the publication style. The feature can be a crossword, comments page, quiz, TV/program listings, puzzle page, letters, classifieds, calendar, chart, or any other non-article department. Preserve the user's intent, but make it print-ready and specific about sections/modules. Body should be 700-1400 characters and describe what the page should contain.\n\nSTYLE: %s\n\nFEATURE TITLE: %s\nFEATURE REQUEST: %s", styleLine(style, "filler"), a.Title, compact(a.Body, 2400))
-	text, err := s.runTextgen(ctx, prompt, 900)
+	text, err := s.runDefapiText(ctx, prompt, 900)
 	if err != nil {
 		return a, err
 	}
@@ -739,7 +793,7 @@ func (s *server) rewriteFeatureForStyle(ctx context.Context, a article, style ma
 
 func (s *server) generateArticles(ctx context.Context, title string, style magazineStyle, count int) ([]article, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of exactly %d objects. Each object must have title and body. Generate original fictional-but-plausible magazine articles that fit this publication. Do not use real copyrighted brands unless generic/current facts are unavoidable. Vary article types: one feature, one short news item, one practical/service piece, one opinion/interview/list if count allows. Body length 900-1500 characters each, ready for print layout.\n\nPUBLICATION: %s\nSTYLE: %s", count, emptyDefault(title, "Untitled Magazine"), styleLine(style, "article"))
-	text, err := s.runTextgen(ctx, prompt, 2200)
+	text, err := s.runDefapiText(ctx, prompt, 2200)
 	if err != nil {
 		return nil, err
 	}
@@ -759,10 +813,11 @@ func (s *server) generateArticles(ctx context.Context, title string, style magaz
 	return cleaned, nil
 }
 
-func (s *server) runTextgen(ctx context.Context, prompt string, maxTokens int) (string, error) {
-	cctx, cancel := context.WithTimeout(ctx, s.cfg.TextgenTimeout)
+func (s *server) runDefapiText(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, s.cfg.DefapiTextTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, s.cfg.TextgenCmd, s.cfg.TextgenModel, "-max-tokens", strconv.Itoa(maxTokens), prompt)
+	args := commandArgs(s.cfg.DefapiTextCategory, s.cfg.DefapiTextModel, "-max-tokens", strconv.Itoa(maxTokens), prompt)
+	cmd := exec.CommandContext(cctx, s.cfg.DefapiTextCmd, args...)
 	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
@@ -770,7 +825,7 @@ func (s *server) runTextgen(ctx context.Context, prompt string, maxTokens int) (
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("textgen timed out after %s: %w", s.cfg.TextgenTimeout, err)
+			return "", fmt.Errorf("defapi text timed out after %s: %w", s.cfg.DefapiTextTimeout, err)
 		}
 		if stderr.Len() > 0 {
 			return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
@@ -780,30 +835,30 @@ func (s *server) runTextgen(ctx context.Context, prompt string, maxTokens int) (
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-func (s *server) runImagegenWithRetry(ctx context.Context, workspace string, pageNumber int, prompt string, images []string, allowPromptTweak bool) (generatedImage, error) {
+func (s *server) runDefapiImageWithRetry(ctx context.Context, workspace string, pageNumber int, prompt string, images []string, allowPromptTweak bool) (generatedImage, error) {
 	var lastErr error
 	currentPrompt := prompt
-	for attempt := 0; attempt <= s.cfg.ImagegenRetries; attempt++ {
+	for attempt := 0; attempt <= s.cfg.DefapiImageRetries; attempt++ {
 		if attempt > 0 {
-			s.workspaceLog(workspace, "imagegen-retry: page=%d attempt=%d/%d", pageNumber, attempt, s.cfg.ImagegenRetries)
+			s.workspaceLog(workspace, "defapi image-retry: page=%d attempt=%d/%d", pageNumber, attempt, s.cfg.DefapiImageRetries)
 		}
-		image, err := s.runImagegen(ctx, workspace, pageNumber, currentPrompt, images)
+		image, err := s.runDefapiImage(ctx, workspace, pageNumber, currentPrompt, images)
 		if err == nil {
 			return image, nil
 		}
 		lastErr = err
-		s.workspaceLog(workspace, "imagegen-retry: page=%d attempt=%d failed: %v", pageNumber, attempt+1, err)
+		s.workspaceLog(workspace, "defapi image-retry: page=%d attempt=%d failed: %v", pageNumber, attempt+1, err)
 		if attempt == 0 && allowPromptTweak {
 			tweaked, tweakErr := s.tweakTemplatePrompt(ctx, currentPrompt, err)
 			if tweakErr != nil {
-				s.workspaceLog(workspace, "imagegen-retry: page=%d prompt tweak failed: %v", pageNumber, tweakErr)
+				s.workspaceLog(workspace, "defapi image-retry: page=%d prompt tweak failed: %v", pageNumber, tweakErr)
 				currentPrompt = safeTemplatePrompt()
 			} else {
-				currentPrompt = limitPrompt(tweaked, s.cfg.ImagegenMaxPromptChars)
+				currentPrompt = limitPrompt(tweaked, s.cfg.DefapiImageMaxPromptChars)
 			}
-			s.workspaceLog(workspace, "imagegen-retry: page=%d using safer template prompt chars=%d", pageNumber, len([]rune(currentPrompt)))
+			s.workspaceLog(workspace, "defapi image-retry: page=%d using safer template prompt chars=%d", pageNumber, len([]rune(currentPrompt)))
 		}
-		if attempt < s.cfg.ImagegenRetries {
+		if attempt < s.cfg.DefapiImageRetries {
 			timer := time.NewTimer(time.Duration(attempt+1) * 4 * time.Second)
 			select {
 			case <-ctx.Done():
@@ -818,7 +873,7 @@ func (s *server) runImagegenWithRetry(ctx context.Context, workspace string, pag
 
 func (s *server) tweakTemplatePrompt(ctx context.Context, prompt string, failure error) (string, error) {
 	req := fmt.Sprintf("Rewrite this image-generation prompt to be safer and simpler. Keep the same goal: a blank printed magazine content-page template. Remove anything that could be interpreted as forbidden, confusing, label-heavy, or too complex. No markdown, return only the revised prompt under 1800 characters.\n\nFailure: %v\n\nPrompt:\n%s", failure, prompt)
-	return s.runTextgen(ctx, req, 700)
+	return s.runDefapiText(ctx, req, 700)
 }
 
 func safeTemplatePrompt() string {
@@ -829,28 +884,27 @@ func defaultTemplatePrompt(style magazineStyle) string {
 	return fmt.Sprintf("Create one completely text-free magazine page layout template.\n%s\nSTYLE: %s\nTEMPLATE: %s\nShow only generic layout geometry: paper texture, margins, column rhythm, blank header band, blank footer band, empty image rectangles, pale rule lines and subtle placeholder blocks. Absolutely no readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no registration marks, no printing press technical marks, no UI and no moodboard. It should be a calm blank layout reference for later pages.", pageFormatInstruction(), styleLine(style, "template"), style.Template)
 }
 
-func (s *server) runImagegen(ctx context.Context, workspace string, pageNumber int, prompt string, images []string) (generatedImage, error) {
-	cctx, cancel := context.WithTimeout(ctx, s.cfg.ImagegenTimeout)
+func (s *server) runDefapiImage(ctx context.Context, workspace string, pageNumber int, prompt string, images []string) (generatedImage, error) {
+	cctx, cancel := context.WithTimeout(ctx, s.cfg.DefapiImageTimeout)
 	defer cancel()
 	filename := fmt.Sprintf("page-%02d-%d.jpg", pageNumber, time.Now().UnixNano())
 	out := filepath.Join(s.workspaceDir(workspace), "renders", filename)
 	args := []string{
-		s.cfg.ImagegenModel,
-		"-format", s.cfg.ImagegenFormat,
-		"-size", s.cfg.ImagegenSize,
-		"-quality", s.cfg.ImagegenQuality,
-		"-background", s.cfg.ImagegenBackground,
+		"-format", s.cfg.DefapiImageFormat,
+		"-size", s.cfg.DefapiImageSize,
+		"-quality", s.cfg.DefapiImageQuality,
+		"-background", s.cfg.DefapiImageBackground,
 		"-output", out,
 	}
 	for _, img := range limitStrings(uniqueStrings(images), 16) {
-		ref := imagegenImageRef(img)
+		ref := defapiImageRef(img)
 		if ref != "" {
 			args = append(args, "-image", ref)
 		}
 	}
-	s.workspaceLog(workspace, "imagegen: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(prompt)), len(images), (len(args)-10)/2)
-	args = append(args, limitPrompt(prompt, s.cfg.ImagegenMaxPromptChars))
-	cmd := exec.CommandContext(cctx, s.cfg.ImagegenCmd, args...)
+	s.workspaceLog(workspace, "defapi image: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(prompt)), len(images), (len(args)-8)/2)
+	args = append(commandArgs(s.cfg.DefapiImageCategory, s.cfg.DefapiImageModel), append(args, limitPrompt(prompt, s.cfg.DefapiImageMaxPromptChars))...)
+	cmd := exec.CommandContext(cctx, s.cfg.DefapiImageCmd, args...)
 	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
@@ -858,31 +912,42 @@ func (s *server) runImagegen(ctx context.Context, workspace string, pageNumber i
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			return generatedImage{}, fmt.Errorf("imagegen timed out after %s: %w", s.cfg.ImagegenTimeout, err)
+			return generatedImage{}, fmt.Errorf("defapi image timed out after %s: %w", s.cfg.DefapiImageTimeout, err)
 		}
 		if stderr.Len() > 0 {
-			s.workspaceLog(workspace, "imagegen: page=%d stderr=%s", pageNumber, strings.TrimSpace(stderr.String()))
+			s.workspaceLog(workspace, "defapi image: page=%d stderr=%s", pageNumber, strings.TrimSpace(stderr.String()))
 			return generatedImage{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 		}
 		return generatedImage{}, err
 	}
 	if outText := strings.TrimSpace(stdout.String()); outText != "" {
-		s.workspaceLog(workspace, "imagegen: page=%d stdout=%s", pageNumber, outText)
+		s.workspaceLog(workspace, "defapi image: page=%d stdout=%s", pageNumber, outText)
 	}
 	if _, err := os.Stat(out); err != nil {
-		return generatedImage{}, fmt.Errorf("expected imagegen to create %s: %w", out, err)
+		return generatedImage{}, fmt.Errorf("expected defapi image to create %s: %w", out, err)
 	}
 	publicURL := parseImageURL(stdout.String())
 	if publicURL == "" {
-		s.workspaceLog(workspace, "imagegen: page=%d warning=no public Image URL in stdout", pageNumber)
+		s.workspaceLog(workspace, "defapi image: page=%d warning=no public Image URL in stdout", pageNumber)
 	}
 	return generatedImage{Image: s.workspaceURL(workspace, "renders/"+filename), PublicURL: publicURL}, nil
 }
 
-func imagegenImageRef(imageRef string) string {
+func commandArgs(parts ...string) []string {
+	args := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			args = append(args, part)
+		}
+	}
+	return args
+}
+
+func defapiImageRef(imageRef string) string {
 	imageRef = strings.TrimSpace(imageRef)
 	if strings.HasPrefix(imageRef, "http://") || strings.HasPrefix(imageRef, "https://") {
-		return imageRef
+		return strings.ReplaceAll(imageRef, ",", "%2C")
 	}
 	return ""
 }
@@ -932,13 +997,9 @@ func fetchRSS(ctx context.Context, feedURL string, limit int) ([]article, error)
 		return nil, err
 	}
 	articles := make([]article, 0, limit)
+	isPodcastFeed := strings.EqualFold(strings.TrimSpace(feed.Channel.PodcastMedium), "podcast")
 	for _, item := range feed.Channel.Items {
-		body := item.Content
-		if body == "" {
-			body = item.Description
-		}
-		a := article{Title: cleanText(item.Title), Body: cleanText(stripArticleHTML(body)), Source: strings.TrimSpace(item.Link), Images: extractImageURLs(body, item.Link)}
-		a = enrichArticleFromURL(ctx, a)
+		a := rssItemArticle(ctx, item, isPodcastFeed)
 		articles = append(articles, a)
 		if len(articles) >= limit {
 			return articles, nil
@@ -963,6 +1024,157 @@ func fetchRSS(ctx context.Context, feedURL string, limit int) ([]article, error)
 	return articles, nil
 }
 
+func rssItemArticle(ctx context.Context, item rssItem, isPodcastFeed bool) article {
+	source := strings.TrimSpace(item.Link)
+	if isPodcastFeed || item.isPodcastEpisode() {
+		return podcastItemArticle(ctx, item, source)
+	}
+	body := item.Content
+	if body == "" {
+		body = item.Description
+	}
+	a := article{Title: cleanText(item.Title), Body: cleanText(stripArticleHTML(body)), Source: source, Images: extractImageURLs(body, source)}
+	return enrichArticleFromURL(ctx, a)
+}
+
+func (item rssItem) isPodcastEpisode() bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.Enclosure.Type)), "audio/") ||
+		len(item.PodcastTranscripts) > 0 ||
+		strings.TrimSpace(item.PodcastChapters.URL) != "" ||
+		strings.TrimSpace(item.PodcastSeason.Value) != "" ||
+		strings.TrimSpace(item.PodcastEpisode.Value) != ""
+}
+
+func podcastItemArticle(ctx context.Context, item rssItem, source string) article {
+	description := cleanText(stripArticleHTML(item.Description))
+	body := description
+	if transcriptURL := firstTranscriptURL(item.PodcastTranscripts); transcriptURL != "" {
+		if transcript, err := fetchPodcastTranscript(ctx, transcriptURL); err == nil && transcript != "" {
+			body = strings.TrimSpace(strings.Join(filterStrings([]string{description, transcript}), "\n\n"))
+		}
+	}
+	body = strings.TrimSpace(strings.Join(filterStrings([]string{podcastMetadata(ctx, item), body}), "\n\n"))
+	images := extractImageURLs(item.Description, source)
+	if href := strings.TrimSpace(item.ItunesImage.Href); href != "" {
+		images = append(images, href)
+	}
+	return article{Title: cleanText(item.Title), Body: cleanText(body), Source: source, Images: uniqueStrings(images), Kind: "podcast"}
+}
+
+func firstTranscriptURL(transcripts []podcastTranscript) string {
+	for _, transcript := range transcripts {
+		u := strings.TrimSpace(transcript.URL)
+		if u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+func podcastMetadata(ctx context.Context, item rssItem) string {
+	parts := []string{}
+	if season := podcastValueText(item.PodcastSeason, item.ItunesSeason); season != "" {
+		parts = append(parts, "Season: "+season)
+	}
+	if episode := podcastValueText(item.PodcastEpisode, item.ItunesEpisode); episode != "" {
+		parts = append(parts, "Episode: "+episode)
+	}
+	if chapters := podcastChaptersText(ctx, item.PodcastChapters.URL); chapters != "" {
+		parts = append(parts, "Chapters: "+chapters)
+	} else if u := strings.TrimSpace(item.PodcastChapters.URL); u != "" {
+		parts = append(parts, "Chapters URL: "+u)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func podcastValueText(v podcastValue, fallback string) string {
+	display := strings.TrimSpace(v.Display)
+	value := cleanText(v.Value)
+	name := strings.TrimSpace(v.Name)
+	if display != "" {
+		return display
+	}
+	if name != "" && value != "" {
+		return name + " (" + value + ")"
+	}
+	if name != "" {
+		return name
+	}
+	if value != "" {
+		return value
+	}
+	return cleanText(fallback)
+}
+
+func fetchPodcastTranscript(ctx context.Context, transcriptURL string) (string, error) {
+	text, err := fetchURLTextFunc(ctx, transcriptURL, 6<<20)
+	if err != nil {
+		return "", err
+	}
+	return cleanTranscriptText(text), nil
+}
+
+func podcastChaptersText(ctx context.Context, chaptersURL string) string {
+	chaptersURL = strings.TrimSpace(chaptersURL)
+	if chaptersURL == "" {
+		return ""
+	}
+	text, err := fetchURLTextFunc(ctx, chaptersURL, 1<<20)
+	if err != nil {
+		return ""
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		return cleanText(text)
+	}
+	titles := []string{}
+	collectJSONTitles(decoded, &titles)
+	return strings.Join(limitStrings(uniqueStrings(titles), 16), "; ")
+}
+
+func collectJSONTitles(v any, titles *[]string) {
+	switch x := v.(type) {
+	case map[string]any:
+		if title, ok := x["title"].(string); ok && strings.TrimSpace(title) != "" {
+			*titles = append(*titles, cleanText(title))
+		}
+		for _, child := range x {
+			collectJSONTitles(child, titles)
+		}
+	case []any:
+		for _, child := range x {
+			collectJSONTitles(child, titles)
+		}
+	}
+}
+
+func fetchURLText(ctx context.Context, rawURL string, maxBytes int64) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", errors.New("missing URL")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "magazine-builder/0.1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("fetch returned HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+var fetchURLTextFunc = fetchURLText
+
 func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []pagePlan {
 	pages := make([]pagePlan, 0, req.PageCount)
 	title := emptyDefault(req.Title, "Untitled Magazine")
@@ -976,7 +1188,7 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []page
 			pages = append(pages, pagePlan{Number: n, Kind: "back-page", Title: "Back page", Prompt: genericPrompt(n, title, style, modules.next("back", 4, n), "back", "Create a strong back page: advert, subscription panel, teaser, index, or closing visual depending on the publication style.")})
 			continue
 		}
-		if isAdvertPage(n, req.PageCount) {
+		if itemPart == 0 && isAdvertPage(n, req.PageCount) {
 			pages = append(pages, pagePlan{Number: n, Kind: "advert", Title: "Advert", Prompt: genericPrompt(n, title, style, modules.next("advert", 4, n), "advert", "Create a full-page fictional advert that belongs naturally in this publication. Use no real brands unless supplied by the article content.")})
 			continue
 		}
@@ -1110,7 +1322,7 @@ func articleTitles(articles []article, max int) string {
 func fallbackStyle(style, referencePath string) magazineStyle {
 	base := emptyDefault(style, "A polished general-interest magazine with clear editorial hierarchy")
 	if referencePath != "" {
-		base += ". Use the uploaded reference image as visual inspiration for palette, texture, typography mood, and image treatment."
+		base += ". Use the reference image URL as visual inspiration for palette, texture, typography mood, and image treatment."
 	}
 	return magazineStyle{
 		Name:       "Custom magazine",
@@ -1330,6 +1542,8 @@ var likelyArticleRE = regexp.MustCompile(`(?is)<(?:article|main)\b[^>]*>(.*?)</(
 var contentBlockRE = regexp.MustCompile(`(?is)<(?:div|section)\b[^>]*(?:class|id)=["'][^"']*(?:article|post|entry|content|story|body|main)[^"']*["'][^>]*>(.*?)</(?:div|section)>`)
 var paragraphRE = regexp.MustCompile(`(?is)<p\b[^>]*>.*?</p>`)
 var titleRE = regexp.MustCompile(`(?is)<h1\b[^>]*>(.*?)</h1>`)
+var transcriptTimestampRE = regexp.MustCompile(`^\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?`)
+var transcriptCueRE = regexp.MustCompile(`^\d+$`)
 
 func stripHTML(s string) string { return tagRE.ReplaceAllString(s, " ") }
 func cleanText(s string) string {
@@ -1342,6 +1556,25 @@ func stripArticleHTML(s string) string {
 	s = stripHTML(s)
 	s = urlTextRE.ReplaceAllString(s, "")
 	return cleanText(s)
+}
+
+func cleanTranscriptText(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" ||
+			strings.EqualFold(line, "WEBVTT") ||
+			strings.HasPrefix(strings.ToUpper(line), "NOTE") ||
+			transcriptTimestampRE.MatchString(line) ||
+			transcriptCueRE.MatchString(line) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return cleanText(stripHTML(strings.Join(out, " ")))
 }
 
 func cleanArticleHTML(s string) string {
@@ -1482,6 +1715,23 @@ func compact(s string, max int) string {
 	}
 	r := []rune(s)
 	return string(r[:max]) + "..."
+}
+
+func sampleLongText(s string, max int) string {
+	s = cleanText(s)
+	r := []rune(s)
+	if max <= 0 || len(r) <= max {
+		return s
+	}
+	if max < 1200 {
+		return string(r[:max]) + "..."
+	}
+	part := max / 3
+	head := strings.TrimSpace(string(r[:part]))
+	midStart := (len(r) - part) / 2
+	middle := strings.TrimSpace(string(r[midStart : midStart+part]))
+	tail := strings.TrimSpace(string(r[len(r)-part:]))
+	return head + "\n\n[Middle excerpt]\n" + middle + "\n\n[Final excerpt]\n" + tail
 }
 
 func limitPrompt(s string, max int) string {

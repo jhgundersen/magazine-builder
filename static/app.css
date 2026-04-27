@@ -193,6 +193,11 @@ button:disabled {
 .field {
   margin-bottom: 14px;
 }
+.import-plan {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
 label {
   display: block;
   font-weight: 700;

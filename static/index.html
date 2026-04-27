@@ -12,7 +12,7 @@
         <h2>DEFAPI key required</h2>
         <p>
           Your key is stored only in this browser via localStorage and sent to
-          this local server for textgen/imagegen calls.
+          this local server for defapi text/defapi image calls.
         </p>
         <label>DEFAPI API key</label
         ><input
@@ -52,7 +52,7 @@
               <h2>Define the publication</h2>
               <p>
                 Name the issue and describe the visual/editorial direction.
-                Textgen will turn this into compact style JSON for the image
+                Defapi text will turn this into compact style JSON for the image
                 prompts.
               </p>
             </div>
@@ -86,11 +86,24 @@
                 </select>
               </div>
               <div class="field">
-                <label>Reference image</label
-                ><input id="reference" type="file" accept="image/*" />
+                <label>Reference image URL</label>
+                <input
+                  id="reference"
+                  type="url"
+                  placeholder="https://example.com/reference.jpg"
+                />
               </div>
               <div class="row">
                 <button class="ghost" id="clear">Clear</button>
+              </div>
+              <div class="field import-plan">
+                <label>Open saved plan JSON</label>
+                <input
+                  id="planFile"
+                  type="file"
+                  accept="application/json,.json"
+                />
+                <div id="importStatus" class="status"></div>
               </div>
               <div id="styleStatus" class="status">
                 Style will be enhanced when you continue.
@@ -130,7 +143,7 @@
           <div id="articles" class="article-list"></div>
           <p class="muted">
             Manual article text can be rough. It is cleaned and rewritten with
-            textgen when the plan is generated.
+            defapi text when the plan is generated.
           </p>
           <div class="step-actions">
             <button class="ghost" id="backStyle">Back</button
@@ -183,6 +196,6 @@
         </div>
       </section>
     </div>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260427-2"></script>
   </body>
 </html>
