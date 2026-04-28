@@ -6,8 +6,6 @@ let apiKey = localStorage.getItem("defapiApiKey") || "";
 let textModel = localStorage.getItem("defapiTextModel") || "claude";
 let imageModel = localStorage.getItem("defapiImageModel") || "gpt2";
 let renderedImages = {};
-let renderedTemplates = {};
-let templatePrompt = "";
 let pagePool = [];
 let draggedIndex = null;
 let currentStep = 1;
@@ -91,23 +89,6 @@ function initModelSelectors() {
       localStorage.setItem("defapiImageModel", imageModel);
     };
 }
-document.addEventListener("click", (e) => {
-  const button = e.target.closest("[data-template-action]");
-  if (!button || button.disabled) return;
-  e.preventDefault();
-  templatePrompt = getTemplatePrompt();
-  if (button.dataset.templateAction === "use") {
-    if (templatesReady()) {
-      withBusy(button, "Rendering...", () => renderRemainingPages());
-    }
-    return;
-  }
-  if (button.dataset.templateAction === "refresh" && lastPlan) {
-    renderedTemplates = {};
-    renderPlan(lastPlan);
-    withBusy(button, "Regenerating...", () => renderTemplateForReview());
-  }
-});
 function updateWorkspaceLabel() {
   const el = $("workspaceLabel");
   if (el)
@@ -426,7 +407,6 @@ async function buildPlan() {
   workspace = data.workspace || workspace;
   updateWorkspaceLabel();
   lastPlan.reference = referencePath;
-  templatePrompt = templatePrompt || defaultTemplatePrompt(data.style || {});
   pagePool = buildPagePool(data.pages || []);
   articles = (
     data.articles && data.articles.length ? data.articles : articles
@@ -464,7 +444,6 @@ function exportPlanJSON() {
     title: $("title").value,
     pageCount: lastPlan && lastPlan.pages ? lastPlan.pages.length : 0,
     reference: referencePath,
-    templatePrompt,
     workspace,
     textModel,
     imageModel,
@@ -479,10 +458,7 @@ function importPlanJSON(raw) {
   imageModel = data.imageModel || imageModel;
   initModelSelectors();
   referencePath = data.reference || data.referencePath || "";
-  templatePrompt =
-    data.templatePrompt || defaultTemplatePrompt((data && data.style) || {});
   renderedImages = {};
-  renderedTemplates = {};
   isRendering = false;
   if (data.title || (data.style && data.style.name)) {
     $("title").value = data.title || data.style.name;
@@ -600,7 +576,7 @@ function setRenderProgress(label) {
   setProgress(
     "renderProgress",
     pct,
-    label + " (external call " + next + " of " + renderCallTotal + ")...",
+    label + " (render step " + next + " of " + renderCallTotal + ")...",
   );
 }
 function completeRenderCall(label) {
@@ -611,44 +587,6 @@ function completeRenderCall(label) {
     pct,
     label + " (" + renderCallDone + " of " + renderCallTotal + " complete)",
   );
-}
-function defaultTemplatePrompt(style) {
-  const styleText =
-    style && style.template
-      ? style.template
-      : "blank content-page production dummy with header, folio, grid and image boxes";
-  const language = (style && style.language) || "English";
-  return JSON.stringify({
-    task: "Create one reusable magazine content-page template image used as a style reference for later pages.",
-    metadata: {
-      page_role: "template",
-      language,
-      format:
-        "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
-      purpose: "shared layout memory for subsequent page generations",
-    },
-    style: {
-      template: styleText,
-    },
-    layout: {
-      structure:
-        "consistent margins, column rhythm, image placeholders, article text placeholders and restrained page furniture",
-      example_header:
-        "small localized running header in " +
-        language +
-        " with publication/section treatment, matching the style",
-      example_footer:
-        "small localized footer folio in " +
-        language +
-        " with the page number on the outer edge and a simple rule or section marker",
-    },
-    constraints: [
-      "keep template generic, not a finished article",
-      "body copy areas must be abstract unreadable grey text-block lines",
-      "only the tiny sample header/footer/folio may contain readable text or numbers",
-      "no masthead, captions, labels, arrows, registration marks, printing press marks, UI or moodboard",
-    ],
-  });
 }
 function renderPlan(data) {
   const kit =
@@ -661,22 +599,22 @@ function renderPlan(data) {
   target.innerHTML =
     '<div class="kit"><label>Style JSON</label><textarea class="prompt style-json" data-style-json>' +
     esc(JSON.stringify(data.style || {}, null, 2)) +
-    '</textarea><div class="status" id="styleJsonStatus">Edit style JSON to update later prompts and templates.</div>\n<strong>Creative kit</strong>\n' +
+    '</textarea><div class="status" id="styleJsonStatus">Edit style JSON to update later prompts.</div><label>Creative kit JSON</label><textarea class="prompt style-json" data-kit-json>' +
     esc(kit) +
-    "</div>" +
+    '</textarea><div class="status" id="kitJsonStatus">Edit creative kit JSON to update later page prompts.</div></div>' +
     unplannedNoticeHTML() +
     '<div id="pageGrid" class="grid">' +
     pageGridHTML(data.pages || []) +
     "</div>";
   wirePromptEditors();
   wireStyleEditor();
+  wireKitEditor();
   wireSwapEditors();
-  wireTemplateActions();
   wireDrag();
 }
 function pageGridHTML(pages) {
   const cover = pages[0] ? pageHTML(pages[0], 0) : "";
-  let html = '<div class="top-pair">' + cover + templateCardHTML() + "</div>";
+  let html = '<div class="top-pair single">' + cover + "</div>";
   const rest = pages.slice(1);
   for (let i = 0; i < rest.length; i += 2) {
     const second = rest[i + 1] ? pageHTML(rest[i + 1], i + 2) : "";
@@ -847,18 +785,6 @@ function pageOptionLabel(page) {
 function buildArticlePromptClient(page, a) {
   const style = (lastPlan && lastPlan.style) || {};
   const kind = a.kind || "article";
-  const styleText = [
-    "Language: " + (style.language || "English"),
-    style.core,
-    style.content,
-    kind === "feature" ? style.feature : style.short,
-    style.typography,
-    style.color,
-    style.print,
-    style.avoid ? "Avoid: " + style.avoid : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
   return JSON.stringify({
     task: "Create a print magazine content page.",
     metadata: {
@@ -869,7 +795,7 @@ function buildArticlePromptClient(page, a) {
         "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
     },
     style: {
-      issue_style: styleText,
+      visual_brief: visualStyleBrief(kind),
     },
     content: {
       title: a.title || "Untitled",
@@ -878,67 +804,8 @@ function buildArticlePromptClient(page, a) {
     layout: {
       required_elements:
         "headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful",
-      continuity:
-        "use the supplied template/reference image for margins, folios, page furniture and grid rhythm",
     },
     constraints: ["full page visible", "no crop"],
-  });
-}
-function templateCardHTML() {
-  const ready = templatesReady();
-  const leftImg =
-    renderedTemplates.left && renderedTemplates.left.image
-      ? '<img class="preview" src="' + esc(renderedTemplates.left.image) + '">'
-      : '<div class="preview"></div>';
-  const rightImg =
-    renderedTemplates.right && renderedTemplates.right.image
-      ? '<img class="preview" src="' + esc(renderedTemplates.right.image) + '">'
-      : '<div class="preview"></div>';
-  const status = ready
-    ? "Review left and right templates before rendering content pages"
-    : "Template placeholders, edit base prompt before rendering";
-  return (
-    '<article class="page fixed"><span class="kind">template</span><h3>Template</h3><div class="page-status">' +
-    status +
-    "</div>" +
-    '<div class="template-pair"><div><span class="kind">left</span>' +
-    leftImg +
-    '</div><div><span class="kind">right</span>' +
-    rightImg +
-    '</div></div><label>Template base prompt</label><textarea class="prompt" data-template-prompt>' +
-    esc(
-      templatePrompt ||
-        defaultTemplatePrompt((lastPlan && lastPlan.style) || {}),
-    ) +
-    '</textarea><div class="template-actions"><button data-template-action="use" class="secondary" ' +
-    (ready ? "" : "disabled") +
-    '>✓ Use</button><button data-template-action="refresh" class="ghost" ' +
-    (lastPlan ? "" : "disabled") +
-    ">↻ Refresh</button></div></article>"
-  );
-}
-function templatesReady() {
-  return (
-    renderedTemplates.left &&
-    renderedTemplates.left.publicUrl &&
-    renderedTemplates.right &&
-    renderedTemplates.right.publicUrl
-  );
-}
-function getTemplatePrompt() {
-  const prompt = document.querySelector(
-    ".wizard-step.active [data-template-prompt]",
-  );
-  return prompt
-    ? prompt.value
-    : templatePrompt ||
-        defaultTemplatePrompt((lastPlan && lastPlan.style) || {});
-}
-function wireTemplateActions() {
-  document.querySelectorAll("[data-template-prompt]").forEach((prompt) => {
-    prompt.oninput = (e) => {
-      templatePrompt = e.target.value;
-    };
   });
 }
 function wirePromptEditors() {
@@ -959,12 +826,28 @@ function wireStyleEditor() {
         const nextStyle = JSON.parse(e.target.value || "{}");
         lastPlan.style = nextStyle;
         $("style").value = JSON.stringify(nextStyle, null, 2);
-        templatePrompt = defaultTemplatePrompt(nextStyle);
         pagePool = buildPagePool(lastPlan.pages || []);
         const status = $("styleJsonStatus");
         if (status) status.textContent = "Style JSON applied.";
       } catch (err) {
         const status = $("styleJsonStatus");
+        if (status)
+          status.textContent =
+            "Invalid JSON: " + (err.message || "check syntax");
+      }
+    };
+  });
+}
+function wireKitEditor() {
+  document.querySelectorAll("[data-kit-json]").forEach((el) => {
+    el.oninput = (e) => {
+      if (!lastPlan) return;
+      try {
+        lastPlan.creativeKit = JSON.parse(e.target.value || "{}");
+        const status = $("kitJsonStatus");
+        if (status) status.textContent = "Creative kit JSON applied.";
+      } catch (err) {
+        const status = $("kitJsonStatus");
         if (status)
           status.textContent =
             "Invalid JSON: " + (err.message || "check syntax");
@@ -1078,12 +961,10 @@ async function startRenderFlow() {
   isRendering = true;
   showStep(4);
   renderedImages = {};
-  renderedTemplates = {};
-  $("templateReview").innerHTML = "";
-  renderCallTotal = 3 + Math.max(0, lastPlan.pages.length - 1) + 1;
+  renderCallTotal = lastPlan.pages.length + 2;
   renderCallDone = 0;
   $("renderStatus").innerHTML = progressHTML(
-    "Starting defapi image call 1 of " + renderCallTotal + "...",
+    "Starting render step 1 of " + renderCallTotal + "...",
     1,
     "renderProgress",
   );
@@ -1096,35 +977,13 @@ async function startRenderFlow() {
     let cover = await renderPage(lastPlan.pages[0], "");
     renderedImages[1] = cover;
     completeRenderCall("Cover rendered");
-    setRenderProgress("Rendering template");
     renderPlan(lastPlan);
-    await renderTemplateForReview();
+    await renderRemainingPages();
   } catch (e) {
     $("renderStatus").textContent = e.message || "Render failed";
     isRendering = false;
     renderPlan(lastPlan);
   }
-}
-async function renderTemplateForReview() {
-  setRenderProgress("Rendering left and right content templates");
-  const [left, right] = await Promise.all([
-    renderTemplate("left"),
-    renderTemplate("right"),
-  ]);
-  completeRenderCall("Left template rendered");
-  completeRenderCall("Right template rendered");
-  renderedTemplates = { left, right };
-  if (!templatesReady()) {
-    $("renderStatus").textContent =
-      "Templates rendered, but defapi image did not return both public Image URLs. Check workspace log.";
-    isRendering = false;
-    renderPlan(lastPlan);
-    return;
-  }
-  setRenderProgress("Review the template card beside the cover.");
-  $("templateReview").innerHTML =
-    '<p class="muted">Use ✓ or refresh ↻ on the template card.</p>';
-  renderPlan(lastPlan);
 }
 async function generateCoverPlan() {
   const res = await fetch("/api/cover-plan", {
@@ -1147,19 +1006,13 @@ async function generateCoverPlan() {
 }
 async function renderRemainingPages() {
   try {
-    $("templateReview").innerHTML = "";
     const middle = lastPlan.pages.slice(1);
     setRenderProgress("Rendering content pages");
     for (let i = 0; i < middle.length; i += 3) {
       await Promise.all(
         middle.slice(i, i + 3).map(async (p) => {
           setStatus(p.number, "Defapi image call queued...");
-          const side = p.number % 2 === 0 ? "left" : "right";
-          const templateRef =
-            renderedTemplates[side] && renderedTemplates[side].publicUrl
-              ? renderedTemplates[side].publicUrl
-              : "";
-          const img = await renderPage(p, templateRef);
+          const img = await renderPage(p, "");
           renderedImages[p.number] = img;
           completeRenderCall("Rendered page " + p.number);
           renderPlan(lastPlan);
@@ -1216,63 +1069,6 @@ async function renderRemainingPages() {
     renderPlan(lastPlan);
   }
 }
-async function renderTemplate(side) {
-  templatePrompt = getTemplatePrompt();
-  const res = await fetch("/api/render-template", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      style: lastPlan.style,
-      reference: referencePath,
-      workspace,
-      apiKey,
-      textModel,
-      imageModel,
-      side,
-      prompt: sideTemplatePrompt(templatePrompt, side),
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "template failed");
-  return { image: data.image, publicUrl: data.publicUrl || "" };
-}
-function sideTemplatePrompt(basePrompt, side) {
-  const style = (lastPlan && lastPlan.style) || {};
-  const language = style.language || "English";
-  const pageNumber = side === "right" ? 3 : 2;
-  const outer = side === "right" ? "right" : "left";
-  try {
-    const prompt = JSON.parse(String(basePrompt || "{}"));
-    prompt.metadata = Object.assign({}, prompt.metadata || {}, {
-      side: side + "-hand page",
-      language,
-    });
-    prompt.layout = Object.assign({}, prompt.layout || {}, {
-      example_footer:
-        "localized footer in " +
-        language +
-        " with page number " +
-        pageNumber +
-        " on the " +
-        outer +
-        " outer edge",
-    });
-    return JSON.stringify(prompt);
-  } catch (_) {
-    return (
-      String(basePrompt || "") +
-      "\n\nSIDE: " +
-      side +
-      "-hand page. LANGUAGE: " +
-      language +
-      ". Put page number " +
-      pageNumber +
-      " on the " +
-      outer +
-      " outer edge."
-    );
-  }
-}
 async function renderPage(page, styleReference) {
   setStatus(page.number, "Rendering...");
   const ref = page.number === 1 ? referencePath : "";
@@ -1284,10 +1080,12 @@ async function renderPage(page, styleReference) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       page: renderPage,
+      style: lastPlan.style || {},
       styleReference,
       reference: ref,
       workspace,
       apiKey,
+      textModel,
       imageModel,
     }),
   });
@@ -1322,10 +1120,16 @@ function finalRenderPrompt(page) {
     const prompt = JSON.parse(String(page.prompt || "{}"));
     prompt.metadata = Object.assign({}, prompt.metadata || {}, {
       language: ((lastPlan && lastPlan.style) || {}).language || "English",
+      tone: ((lastPlan && lastPlan.style) || {}).tone || "editorial",
     });
-    prompt.style = Object.assign({}, prompt.style || {}, {
-      issue_style: stylePromptText(page.kind || "content"),
-    });
+    prompt.style = {
+      visual_brief: visualStyleBrief(page.kind || "content"),
+      creative_kit:
+        lastPlan && lastPlan.creativeKit ? lastPlan.creativeKit : {},
+    };
+    if (prompt.layout) {
+      delete prompt.layout.continuity;
+    }
     prompt.render_position = renderPosition;
     return JSON.stringify(prompt);
   } catch (_) {
@@ -1336,7 +1140,7 @@ function finalRenderPrompt(page) {
     });
   }
 }
-function stylePromptText(kind) {
+function visualStyleBrief(kind) {
   const style = (lastPlan && lastPlan.style) || {};
   const specific =
     kind === "cover"
@@ -1351,13 +1155,14 @@ function stylePromptText(kind) {
               ? style.back
               : style.content || style.short;
   return [
-    "Language: " + (style.language || "English"),
+    "Self-contained visual system for this page:",
     style.core,
-    style.typography,
-    style.color,
-    style.print,
     style.content,
     specific,
+    "Typography: " + (style.typography || ""),
+    "Palette: " + (style.color || ""),
+    "Print treatment: " + (style.print || ""),
+    "Page furniture: repeat this exact system from the style JSON: same margins, column grid, running-header placement, footer rule, folio placement and caption treatment.",
     style.avoid ? "Avoid: " + style.avoid : "",
   ]
     .filter(Boolean)
