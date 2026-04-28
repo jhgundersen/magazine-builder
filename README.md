@@ -15,16 +15,18 @@ It lets a user:
 - render page images with live previews, using the cover plus a shared blank content template as style references
 - write the rendered pages into a PDF
 
-## Run
-
-Install `defapi` first:
+## Install
 
 ```sh
-go install github.com/jhgundersen/defapi-cli@latest
+curl -fsSL https://raw.githubusercontent.com/jhgundersen/magazine-builder/master/install.sh | sh
 ```
 
+Installs `magazine-builder` and `defapi-cli`. Make sure `~/.local/bin` is in your `PATH`.
+
+## Run
+
 ```sh
-go run .
+magazine-builder
 ```
 
 Open http://localhost:8080.
