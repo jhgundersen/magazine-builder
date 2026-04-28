@@ -99,6 +99,16 @@ button:disabled {
   border-radius: 6px;
   padding: 8px 10px;
 }
+.model-bar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 240px));
+  gap: 12px;
+  justify-content: end;
+  margin: 0 0 18px;
+}
+.model-bar label {
+  font-size: 12px;
+}
 .key-gate {
   position: fixed;
   inset: 0;
@@ -248,9 +258,12 @@ textarea {
 }
 .article-tools {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) 150px auto;
   gap: 10px;
-  align-items: end;
+  align-items: start;
+}
+.article-tools > button {
+  margin-top: 27px;
 }
 .article-list {
   display: grid;
@@ -296,6 +309,9 @@ textarea {
 .spread {
   border-top: 1px solid var(--line);
   padding-top: 14px;
+}
+.spread.single {
+  grid-template-columns: minmax(290px, 1fr);
 }
 .progress {
   height: 10px;
@@ -353,6 +369,15 @@ textarea {
   border-radius: 6px;
   padding: 8px;
   resize: vertical;
+}
+.style-json {
+  min-height: 220px;
+  margin-bottom: 8px;
+}
+.template-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 8px;
 }
 .template-preview {
   display: grid;
@@ -414,6 +439,7 @@ textarea {
     grid-template-columns: 1fr 1fr;
   }
   .form-grid,
+  .model-bar,
   .article-tools,
   .top-pair,
   .spread {

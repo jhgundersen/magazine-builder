@@ -39,6 +39,26 @@
         <div id="workspaceLabel" class="workspace">No workspace yet</div>
         <button id="changeApiKey" class="ghost">API key</button>
       </header>
+      <section class="model-bar" aria-label="DefAPI models">
+        <div>
+          <label>Text AI model</label>
+          <select id="textModel">
+            <option value="claude" selected>claude</option>
+            <option value="gpt">gpt</option>
+            <option value="gemini">gemini</option>
+          </select>
+        </div>
+        <div>
+          <label>Image AI model</label>
+          <select id="imageModel">
+            <option value="gpt2" selected>gpt2</option>
+            <option value="gpt">gpt</option>
+            <option value="google">google</option>
+            <option value="mj">mj</option>
+            <option value="wan">wan</option>
+          </select>
+        </div>
+      </section>
       <nav class="steps" aria-label="Wizard steps">
         <div class="step-pill active" data-step-label="1">1. Style</div>
         <div class="step-pill" data-step-label="2">2. Articles</div>
@@ -131,6 +151,16 @@
               ><input id="rss" placeholder="https://example.com/feed.xml" />
               <div id="rssStatus" class="status"></div>
             </div>
+            <div>
+              <label>Import group</label>
+              <select id="rssGroup">
+                <option value="0">1-10 newest</option>
+                <option value="10">11-20</option>
+                <option value="20">21-30</option>
+                <option value="30">31-40</option>
+                <option value="40">41-50</option>
+              </select>
+            </div>
             <button id="importRSS">Import latest</button>
           </div>
           <div class="toolbar">
@@ -196,6 +226,6 @@
         </div>
       </section>
     </div>
-    <script src="/static/app.js?v=20260427-2"></script>
+    <script src="/static/app.js?v=20260428-1"></script>
   </body>
 </html>

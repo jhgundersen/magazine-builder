@@ -62,6 +62,8 @@ type progressStatus struct {
 }
 
 type apiKeyContextKey struct{}
+type textModelContextKey struct{}
+type imageModelContextKey struct{}
 
 type styleRequest struct {
 	Style  string `json:"style"`
@@ -78,9 +80,11 @@ type styleResponse struct {
 type rssRequest struct {
 	URL       string `json:"url"`
 	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
 	Style     string `json:"style"`
 	Workspace string `json:"workspace"`
 	APIKey    string `json:"apiKey"`
+	TextModel string `json:"textModel"`
 }
 
 type generateArticlesRequest struct {
@@ -89,6 +93,7 @@ type generateArticlesRequest struct {
 	Count     int    `json:"count"`
 	Workspace string `json:"workspace"`
 	APIKey    string `json:"apiKey"`
+	TextModel string `json:"textModel"`
 }
 
 type article struct {
@@ -109,6 +114,7 @@ type buildRequest struct {
 	Articles     []article `json:"articles"`
 	Workspace    string    `json:"workspace"`
 	APIKey       string    `json:"apiKey"`
+	TextModel    string    `json:"textModel"`
 }
 
 type buildResponse struct {
@@ -118,6 +124,28 @@ type buildResponse struct {
 	Pages       []pagePlan    `json:"pages"`
 	Reference   string        `json:"reference,omitempty"`
 	Workspace   string        `json:"workspace"`
+}
+
+type coverPlanRequest struct {
+	Title     string        `json:"title"`
+	Style     magazineStyle `json:"style"`
+	Pages     []pagePlan    `json:"pages"`
+	Workspace string        `json:"workspace"`
+	APIKey    string        `json:"apiKey"`
+	TextModel string        `json:"textModel"`
+}
+
+type coverPlan struct {
+	Language       string          `json:"language"`
+	MainStoryTitle string          `json:"mainStoryTitle"`
+	Lines          []coverLineItem `json:"lines"`
+}
+
+type coverLineItem struct {
+	Page  int    `json:"page"`
+	Title string `json:"title"`
+	Label string `json:"label"`
+	Role  string `json:"role,omitempty"`
 }
 
 type pagePlan struct {
@@ -131,6 +159,7 @@ type pagePlan struct {
 
 type magazineStyle struct {
 	Name       string `json:"name"`
+	Language   string `json:"language"`
 	Core       string `json:"core"`
 	Cover      string `json:"cover"`
 	Content    string `json:"content"`
@@ -160,6 +189,7 @@ type renderPageRequest struct {
 	Reference      string   `json:"reference"`
 	Workspace      string   `json:"workspace"`
 	APIKey         string   `json:"apiKey"`
+	ImageModel     string   `json:"imageModel"`
 }
 
 type renderPageResponse struct {
@@ -173,11 +203,14 @@ type generatedImage struct {
 }
 
 type templateRequest struct {
-	Style     magazineStyle `json:"style"`
-	Reference string        `json:"reference"`
-	Workspace string        `json:"workspace"`
-	APIKey    string        `json:"apiKey"`
-	Prompt    string        `json:"prompt"`
+	Style      magazineStyle `json:"style"`
+	Reference  string        `json:"reference"`
+	Workspace  string        `json:"workspace"`
+	APIKey     string        `json:"apiKey"`
+	TextModel  string        `json:"textModel"`
+	ImageModel string        `json:"imageModel"`
+	Side       string        `json:"side"`
+	Prompt     string        `json:"prompt"`
 }
 
 type pdfRequest struct {
@@ -201,6 +234,8 @@ type rssFeed struct {
 type rssItem struct {
 	Title              string              `xml:"title"`
 	Link               string              `xml:"link"`
+	PubDate            string              `xml:"pubDate"`
+	Date               string              `xml:"http://purl.org/dc/elements/1.1/ date"`
 	Description        string              `xml:"description"`
 	Content            string              `xml:"encoded"`
 	Enclosure          rssEnclosure        `xml:"enclosure"`
@@ -214,10 +249,12 @@ type rssItem struct {
 }
 
 type atomEntry struct {
-	Title   string     `xml:"title"`
-	Link    []atomLink `xml:"link"`
-	Summary string     `xml:"summary"`
-	Content string     `xml:"content"`
+	Title     string     `xml:"title"`
+	Link      []atomLink `xml:"link"`
+	Published string     `xml:"published"`
+	Updated   string     `xml:"updated"`
+	Summary   string     `xml:"summary"`
+	Content   string     `xml:"content"`
 }
 
 type atomLink struct {
@@ -231,6 +268,14 @@ type rssEnclosure struct {
 
 type imageHref struct {
 	Href string `xml:"href,attr"`
+}
+
+type feedCandidate struct {
+	Kind      string
+	RSSItem   rssItem
+	AtomEntry atomEntry
+	Date      time.Time
+	Index     int
 }
 
 type podcastTranscript struct {
@@ -262,6 +307,7 @@ func main() {
 	mux.HandleFunc("/api/import-rss", s.handleImportRSS)
 	mux.HandleFunc("/api/generate-articles", s.handleGenerateArticles)
 	mux.HandleFunc("/api/build", s.handleBuild)
+	mux.HandleFunc("/api/cover-plan", s.handleCoverPlan)
 	mux.HandleFunc("/api/render-page", s.handleRenderPage)
 	mux.HandleFunc("/api/render-template", s.handleRenderTemplate)
 	mux.HandleFunc("/api/write-pdf", s.handleWritePDF)
@@ -320,7 +366,7 @@ func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithAPIKey(r.Context(), r.FormValue("apiKey"))
+	ctx := contextWithModels(contextWithAPIKey(r.Context(), r.FormValue("apiKey")), r.FormValue("textModel"), "")
 	title := strings.TrimSpace(r.FormValue("title"))
 	style := strings.TrimSpace(r.FormValue("style"))
 	workspace, err := s.ensureWorkspace(r.FormValue("workspace"), style)
@@ -355,27 +401,30 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithAPIKey(r.Context(), req.APIKey)
+	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, "")
 	if req.Limit <= 0 || req.Limit > 50 {
 		req.Limit = 10
+	}
+	if req.Offset < 0 {
+		req.Offset = 0
 	}
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Style)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	articles, err := fetchRSS(ctx, req.URL, req.Limit)
+	articles, err := fetchRSS(ctx, req.URL, req.Offset, req.Limit)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
 	style := parseStyle(req.Style)
-	for i := range articles {
-		if articles[i].Kind == "podcast" && len([]rune(articles[i].Body)) > 3500 {
+	parallelMap(len(articles), 3, func(i int) {
+		if articles[i].Kind == "podcast" && len([]rune(articles[i].Body)) > 5000 {
 			summarized, err := s.summarizePodcastForImport(ctx, articles[i], style)
 			if err != nil {
 				log.Printf("defapi text podcast summary failed for %q: %v", articles[i].Title, err)
-				articles[i].Body = sampleLongText(articles[i].Body, 3200)
+				articles[i].Body = sampleLongText(articles[i].Body, 4800)
 			} else {
 				articles[i].Title = summarized.Title
 				articles[i].Body = summarized.Body
@@ -384,12 +433,12 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		improved, err := s.rewriteArticleForStyle(ctx, articles[i], style)
 		if err != nil {
 			log.Printf("defapi text article rewrite failed for %q: %v", articles[i].Title, err)
-			continue
+			return
 		}
 		articles[i].Title = improved.Title
 		articles[i].Body = improved.Body
 		articles[i].Enhanced = true
-	}
+	})
 	writeJSON(w, map[string]any{"articles": articles, "workspace": workspace})
 }
 
@@ -403,7 +452,7 @@ func (s *server) handleGenerateArticles(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithAPIKey(r.Context(), req.APIKey)
+	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, "")
 	if req.Count <= 0 || req.Count > 12 {
 		req.Count = 4
 	}
@@ -431,7 +480,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithAPIKey(r.Context(), req.APIKey)
+	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, "")
 	req.PageCount = normalizePageCount(req.PageCount)
 	req.Articles = cleanArticles(req.Articles)
 	style := parseStyle(req.Style)
@@ -503,6 +552,31 @@ func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status)
 }
 
+func (s *server) handleCoverPlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req coverPlanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, "")
+	workspace, err := s.ensureWorkspace(req.Workspace, req.Title)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.workspaceLog(workspace, "cover-plan: start pages=%d", len(req.Pages))
+	plan, err := s.generateCoverPlan(ctx, req.Title, req.Style, req.Pages)
+	if err != nil {
+		s.workspaceLog(workspace, "cover-plan: failed: %v", err)
+		plan = fallbackCoverPlan(req.Style, req.Pages)
+	}
+	writeJSON(w, map[string]any{"coverPlan": plan, "workspace": workspace})
+}
+
 func (s *server) handleRenderTemplate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -513,11 +587,12 @@ func (s *server) handleRenderTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithAPIKey(r.Context(), req.APIKey)
+	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, req.ImageModel)
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
-		prompt = defaultTemplatePrompt(req.Style)
+		prompt = defaultTemplatePrompt(req.Style, req.Side)
 	}
+	prompt = s.templatePromptWithCopy(ctx, req.Style, req.Side, prompt)
 	prompt = limitPrompt(prompt, s.cfg.DefapiImageMaxPromptChars)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Style.Name)
 	if err != nil {
@@ -545,7 +620,7 @@ func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithAPIKey(r.Context(), req.APIKey)
+	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), "", req.ImageModel)
 	images := filterStrings([]string{req.StyleReference, req.Reference})
 	images = append(images, req.Page.Images...)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Page.Title)
@@ -694,7 +769,7 @@ func newWorkspaceID(title string) string {
 }
 
 func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath string) (magazineStyle, error) {
-	prompt := "Return only valid compact JSON for a reusable magazine/newspaper style. No markdown. Keep each field under 220 characters so later image prompts stay under 4000 chars. Required keys: name, core, cover, content, feature, short, advert, filler, back, template, typography, color, print, avoid. The name field must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". Define different guidance for cover, normal content pages, feature articles, short articles, adverts, filler/departments, back page, and a completely text-free blank content template image. The template field must describe only generic layout shapes, margins, empty image areas and grid rhythm, with no letters, masthead, captions, labels, technical print marks or readable text.\n\nUser style:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
+	prompt := "Return only valid compact JSON for a reusable magazine/newspaper style. No markdown. Keep each field under 220 characters so later image prompts stay under 4000 chars. Required keys: name, language, core, cover, content, feature, short, advert, filler, back, template, typography, color, print, avoid. The name field must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". The language field must be the publication language inferred from the user style/title, such as English, Norwegian Bokmal, French, etc. Define different guidance for cover, normal content pages, feature articles, short articles, adverts, filler/departments, back page, and a blank content template image. The template field must describe generic layout shapes, margins, empty image areas, grid rhythm, and small localized header/footer/folio treatment.\n\nUser style:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
 	if referencePath != "" {
 		prompt += "\n\nReference image URL: " + referencePath + "\nUse this URL as visual inspiration for palette, typography mood, texture and layout feeling, but describe the reusable style in words."
 	}
@@ -723,8 +798,16 @@ func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, styl
 }
 
 func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Rewrite this imported web article into print-ready magazine copy matching the style. Keep facts and names, remove web/navigation language, remove links, embeds, YouTube mentions, newsletter prompts and SEO clutter. Title should fit the publication voice. Body should be 900-1600 characters, in coherent paragraphs, ready for page layout.\n\nSTYLE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s", styleLine(style, "article"), a.Title, compact(a.Body, 3200))
-	text, err := s.runDefapiText(ctx, prompt, 1000)
+	bodyRange := "900-1600"
+	bodySample := compact(a.Body, 3200)
+	maxTokens := 1000
+	if a.Kind == "podcast" {
+		bodyRange = "1800-2800"
+		bodySample = sampleLongText(a.Body, 6500)
+		maxTokens = 1600
+	}
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Rewrite this imported source into print-ready magazine copy matching the style. Keep facts, names, chronology, arguments, concrete examples and useful nuance. Remove web/navigation language, links, embeds, YouTube mentions, newsletter prompts, transcript mechanics and SEO clutter. Title should fit the publication voice. Body should be %s characters, in coherent paragraphs, ready for page layout.\n\nSTYLE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s", bodyRange, styleLine(style, "article"), a.Title, bodySample)
+	text, err := s.runDefapiText(ctx, prompt, maxTokens)
 	if err != nil {
 		return a, err
 	}
@@ -746,8 +829,8 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 }
 
 func (s *server) summarizePodcastForImport(ctx context.Context, a article, style magazineStyle) (article, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Summarize this podcast episode source material into print-editorial notes for a later magazine article rewrite. Preserve concrete facts, people, works, chronology, arguments, opinions and useful chapter structure. Do not mention transcripts, timestamps, RSS, show notes or source mechanics. Title should be a concise episode/article title. Body should be 1400-2200 characters, factual and balanced, not finished prose.\n\nSTYLE CONTEXT: %s\n\nEPISODE TITLE: %s\nSOURCE MATERIAL SAMPLE:\n%s", styleLine(style, "article"), a.Title, sampleLongText(a.Body, 12000))
-	text, err := s.runDefapiText(ctx, prompt, 1200)
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Summarize this podcast episode source material into detailed print-editorial notes for a later magazine article rewrite. Preserve concrete facts, people, works, chronology, arguments, opinions, disagreements, examples, recommendations and useful chapter structure. Prefer substance over polish. Do not mention transcripts, timestamps, RSS, show notes or source mechanics. Title should be a concise episode/article title. Body should be 2600-4200 characters, factual and balanced, not finished prose.\n\nSTYLE CONTEXT: %s\n\nEPISODE TITLE: %s\nSOURCE MATERIAL SAMPLE:\n%s", styleLine(style, "article"), a.Title, sampleLongText(a.Body, 18000))
+	text, err := s.runDefapiText(ctx, prompt, 2200)
 	if err != nil {
 		return a, err
 	}
@@ -813,10 +896,162 @@ func (s *server) generateArticles(ctx context.Context, title string, style magaz
 	return cleaned, nil
 }
 
+func (s *server) generateCoverPlan(ctx context.Context, title string, style magazineStyle, pages []pagePlan) (coverPlan, error) {
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys language, mainStoryTitle, lines. The lines value must be an array of 4-7 objects with keys page, title, label and role. Choose the strongest cover lines from the final page order. Identify exactly one main story using mainStoryTitle and role=\"main\" on that line. Translate page labels into the publication language; do not use English-only shorthand like p2 unless that is natural for the language. Use the final page numbers exactly as supplied. Avoid adverts unless the issue has too few editorial pages.\n\nPUBLICATION: %s\nLANGUAGE: %s\nSTYLE: %s\nFINAL PAGES:\n%s", emptyDefault(title, style.Name), emptyDefault(style.Language, "English"), styleLine(style, "cover"), pageListForCover(pages))
+	text, err := s.runDefapiText(ctx, prompt, 900)
+	if err != nil {
+		return coverPlan{}, err
+	}
+	var out coverPlan
+	if err := json.Unmarshal([]byte(extractJSONObject(text)), &out); err != nil {
+		return coverPlan{}, err
+	}
+	if strings.TrimSpace(out.Language) == "" {
+		out.Language = emptyDefault(style.Language, "English")
+	}
+	out.Lines = cleanCoverLines(out.Lines, pages)
+	if len(out.Lines) == 0 {
+		return fallbackCoverPlan(style, pages), nil
+	}
+	if strings.TrimSpace(out.MainStoryTitle) == "" {
+		out.MainStoryTitle = out.Lines[0].Title
+		out.Lines[0].Role = "main"
+	}
+	return out, nil
+}
+
+type templateCopy struct {
+	Header string `json:"header"`
+	Footer string `json:"footer"`
+}
+
+func (s *server) generateTemplateCopy(ctx context.Context, style magazineStyle, side string) (templateCopy, error) {
+	side = normalizeTemplateSide(side)
+	pageNumber := 2
+	if side == "right" {
+		pageNumber = 3
+	}
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys header and footer. Write very short localized magazine template copy in %s. Header: 1-4 words suitable for a running header or section slug. Footer: 1-5 words that can sit beside page number %d. Match this publication style: %s", emptyDefault(style.Language, "English"), pageNumber, styleLine(style, "template"))
+	text, err := s.runDefapiText(ctx, prompt, 300)
+	if err != nil {
+		return templateCopy{}, err
+	}
+	var out templateCopy
+	if err := json.Unmarshal([]byte(extractJSONObject(text)), &out); err != nil {
+		return templateCopy{}, err
+	}
+	out.Header = compact(cleanText(out.Header), 60)
+	out.Footer = compact(cleanText(out.Footer), 70)
+	if out.Header == "" || out.Footer == "" {
+		return templateCopy{}, errors.New("empty template copy")
+	}
+	return out, nil
+}
+
+func (s *server) templatePromptWithCopy(ctx context.Context, style magazineStyle, side, prompt string) string {
+	copy, err := s.generateTemplateCopy(ctx, style, side)
+	if err != nil {
+		log.Printf("defapi text template copy failed: %v", err)
+		copy = fallbackTemplateCopy(style, side)
+	}
+	payload := map[string]string{
+		"header":   copy.Header,
+		"footer":   copy.Footer,
+		"language": emptyDefault(style.Language, "English"),
+		"side":     normalizeTemplateSide(side),
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(prompt), &decoded); err == nil {
+		decoded["template_copy"] = payload
+		return compactJSON(decoded)
+	}
+	return prompt + "\n\nTEMPLATE COPY JSON: " + compactJSON(payload)
+}
+
+func fallbackTemplateCopy(style magazineStyle, side string) templateCopy {
+	language := strings.ToLower(emptyDefault(style.Language, "English"))
+	if strings.Contains(language, "norwegian") || strings.Contains(language, "norsk") {
+		if normalizeTemplateSide(side) == "right" {
+			return templateCopy{Header: "Reportasje", Footer: "Neste side"}
+		}
+		return templateCopy{Header: "Innhold", Footer: "Magasin"}
+	}
+	if normalizeTemplateSide(side) == "right" {
+		return templateCopy{Header: "Feature", Footer: "Continued"}
+	}
+	return templateCopy{Header: "Contents", Footer: "Magazine"}
+}
+
+func pageListForCover(pages []pagePlan) string {
+	parts := []string{}
+	for _, p := range pages {
+		if p.Number <= 1 {
+			continue
+		}
+		body := ""
+		if p.Article != nil {
+			body = compact(p.Article.Body, 180)
+		}
+		parts = append(parts, fmt.Sprintf("- page %d | kind=%s | title=%s | body=%s", p.Number, p.Kind, emptyDefault(p.Title, "Untitled"), body))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func cleanCoverLines(lines []coverLineItem, pages []pagePlan) []coverLineItem {
+	allowed := map[int]pagePlan{}
+	for _, p := range pages {
+		if p.Number > 1 {
+			allowed[p.Number] = p
+		}
+	}
+	out := []coverLineItem{}
+	seen := map[int]bool{}
+	for _, line := range lines {
+		p, ok := allowed[line.Page]
+		if !ok || seen[line.Page] {
+			continue
+		}
+		line.Title = cleanText(emptyDefault(line.Title, p.Title))
+		line.Label = cleanText(line.Label)
+		if line.Label == "" {
+			line.Label = fmt.Sprintf("page %d", line.Page)
+		}
+		line.Role = cleanText(line.Role)
+		seen[line.Page] = true
+		out = append(out, line)
+		if len(out) >= 7 {
+			break
+		}
+	}
+	return out
+}
+
+func fallbackCoverPlan(style magazineStyle, pages []pagePlan) coverPlan {
+	lines := []coverLineItem{}
+	for _, p := range pages {
+		if p.Number <= 1 || p.Kind == "advert" || p.Kind == "back-page" {
+			continue
+		}
+		role := ""
+		if len(lines) == 0 {
+			role = "main"
+		}
+		lines = append(lines, coverLineItem{Page: p.Number, Title: p.Title, Label: fmt.Sprintf("page %d", p.Number), Role: role})
+		if len(lines) >= 6 {
+			break
+		}
+	}
+	main := ""
+	if len(lines) > 0 {
+		main = lines[0].Title
+	}
+	return coverPlan{Language: emptyDefault(style.Language, "English"), MainStoryTitle: main, Lines: lines}
+}
+
 func (s *server) runDefapiText(ctx context.Context, prompt string, maxTokens int) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.DefapiTextTimeout)
 	defer cancel()
-	args := commandArgs(s.cfg.DefapiTextCategory, s.cfg.DefapiTextModel, "-max-tokens", strconv.Itoa(maxTokens), prompt)
+	args := commandArgs(s.cfg.DefapiTextCategory, textModelFromContext(ctx, s.cfg.DefapiTextModel), "-max-tokens", strconv.Itoa(maxTokens), prompt)
 	cmd := exec.CommandContext(cctx, s.cfg.DefapiTextCmd, args...)
 	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -877,11 +1112,65 @@ func (s *server) tweakTemplatePrompt(ctx context.Context, prompt string, failure
 }
 
 func safeTemplatePrompt() string {
-	return "Create one completely text-free blank magazine layout page. Portrait page, aspect ratio 1240:1754, full page visible, no crop. Use only generic visual shapes: margins, a blank top band, a blank bottom band, a two-column grid, pale empty image rectangles, soft grey text-block shapes without letters, and subtle paper texture. No readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no diagrams, no UI, no technical print marks. Calm editorial layout reference only."
+	return compactJSON(map[string]any{
+		"task": "Create a reusable printed magazine content-page template.",
+		"metadata": map[string]any{
+			"page_role": "template",
+			"format":    pageFormatInstruction(),
+		},
+		"style": map[string]any{
+			"direction": "calm editorial production dummy with tactile paper, consistent margins, restrained rules and realistic print texture",
+		},
+		"layout": map[string]any{
+			"grid":          "two-column editorial grid with generous margins, image slots and body-copy placeholder blocks",
+			"header_footer": "small sample running header at top and a small footer folio with page number 2 on the outer edge",
+		},
+		"constraints": []string{"full page visible", "no crop", "no UI", "no technical print marks", "only minimal sample header/footer text and folio; body text must be abstract unreadable grey lines"},
+	})
 }
 
-func defaultTemplatePrompt(style magazineStyle) string {
-	return fmt.Sprintf("Create one completely text-free magazine page layout template.\n%s\nSTYLE: %s\nTEMPLATE: %s\nShow only generic layout geometry: paper texture, margins, column rhythm, blank header band, blank footer band, empty image rectangles, pale rule lines and subtle placeholder blocks. Absolutely no readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no registration marks, no printing press technical marks, no UI and no moodboard. It should be a calm blank layout reference for later pages.", pageFormatInstruction(), styleLine(style, "template"), style.Template)
+func defaultTemplatePrompt(style magazineStyle, side string) string {
+	side = normalizeTemplateSide(side)
+	pageNumber := 2
+	outer := "left"
+	if side == "right" {
+		pageNumber = 3
+		outer = "right"
+	}
+	return compactJSON(map[string]any{
+		"task": "Create one reusable magazine content-page template image used as a style reference for later pages.",
+		"metadata": map[string]any{
+			"page_role": "template",
+			"side":      side + "-hand page",
+			"language":  emptyDefault(style.Language, "English"),
+			"format":    pageFormatInstruction(),
+			"purpose":   "shared layout memory for subsequent page generations",
+		},
+		"style": map[string]any{
+			"issue_style": styleLine(style, "template"),
+			"template":    style.Template,
+		},
+		"layout": map[string]any{
+			"structure":      "portrait page with consistent margins, column rhythm, image placeholders, article text placeholders and restrained page furniture",
+			"example_header": "small localized running header in " + emptyDefault(style.Language, "English") + " with publication/section treatment, matching the style",
+			"example_footer": fmt.Sprintf("small localized footer folio in %s with page number %d on the %s outer edge and a simple rule or section marker", emptyDefault(style.Language, "English"), pageNumber, outer),
+		},
+		"constraints": []string{
+			"full page visible edge to edge",
+			"keep template generic, not a finished article",
+			"body copy areas must be abstract unreadable grey text-block lines",
+			"only the tiny sample header/footer/folio may contain readable text or numbers",
+			"no masthead, captions, labels, arrows, registration marks, printing press marks, UI or moodboard",
+		},
+	})
+}
+
+func normalizeTemplateSide(side string) string {
+	side = strings.ToLower(strings.TrimSpace(side))
+	if side == "right" || side == "odd" {
+		return "right"
+	}
+	return "left"
 }
 
 func (s *server) runDefapiImage(ctx context.Context, workspace string, pageNumber int, prompt string, images []string) (generatedImage, error) {
@@ -903,7 +1192,7 @@ func (s *server) runDefapiImage(ctx context.Context, workspace string, pageNumbe
 		}
 	}
 	s.workspaceLog(workspace, "defapi image: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(prompt)), len(images), (len(args)-8)/2)
-	args = append(commandArgs(s.cfg.DefapiImageCategory, s.cfg.DefapiImageModel), append(args, limitPrompt(prompt, s.cfg.DefapiImageMaxPromptChars))...)
+	args = append(commandArgs(s.cfg.DefapiImageCategory, imageModelFromContext(ctx, s.cfg.DefapiImageModel)), append(args, limitPrompt(prompt, s.cfg.DefapiImageMaxPromptChars))...)
 	cmd := exec.CommandContext(cctx, s.cfg.DefapiImageCmd, args...)
 	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -970,10 +1259,16 @@ func (s *server) renderURLToPath(workspace, imageURL string) (string, bool) {
 	return filepath.Join(s.workspaceDir(workspace), "renders", name), true
 }
 
-func fetchRSS(ctx context.Context, feedURL string, limit int) ([]article, error) {
+func fetchRSS(ctx context.Context, feedURL string, offset, limit int) ([]article, error) {
 	feedURL = strings.TrimSpace(feedURL)
 	if feedURL == "" {
 		return nil, errors.New("missing RSS URL")
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 10
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
@@ -996,16 +1291,42 @@ func fetchRSS(ctx context.Context, feedURL string, limit int) ([]article, error)
 	if err := xml.Unmarshal(data, &feed); err != nil {
 		return nil, err
 	}
-	articles := make([]article, 0, limit)
+	candidates := []feedCandidate{}
 	isPodcastFeed := strings.EqualFold(strings.TrimSpace(feed.Channel.PodcastMedium), "podcast")
-	for _, item := range feed.Channel.Items {
-		a := rssItemArticle(ctx, item, isPodcastFeed)
-		articles = append(articles, a)
-		if len(articles) >= limit {
-			return articles, nil
-		}
+	for i, item := range feed.Channel.Items {
+		candidates = append(candidates, feedCandidate{Kind: "rss", RSSItem: item, Date: parseFeedDate(item.PubDate, item.Date), Index: i})
 	}
-	for _, entry := range feed.Entries {
+	for i, entry := range feed.Entries {
+		candidates = append(candidates, feedCandidate{Kind: "atom", AtomEntry: entry, Date: parseFeedDate(entry.Published, entry.Updated), Index: len(feed.Channel.Items) + i})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Date.IsZero() && candidates[j].Date.IsZero() {
+			return candidates[i].Index < candidates[j].Index
+		}
+		if candidates[i].Date.IsZero() {
+			return false
+		}
+		if candidates[j].Date.IsZero() {
+			return true
+		}
+		return candidates[i].Date.After(candidates[j].Date)
+	})
+	if offset >= len(candidates) {
+		return []article{}, nil
+	}
+	end := offset + limit
+	if end > len(candidates) {
+		end = len(candidates)
+	}
+	selected := candidates[offset:end]
+	articles := make([]article, len(selected))
+	parallelMap(len(selected), 6, func(i int) {
+		candidate := selected[i]
+		if candidate.Kind == "rss" {
+			articles[i] = rssItemArticle(ctx, candidate.RSSItem, isPodcastFeed)
+			return
+		}
+		entry := candidate.AtomEntry
 		link := ""
 		if len(entry.Link) > 0 {
 			link = entry.Link[0].Href
@@ -1015,13 +1336,53 @@ func fetchRSS(ctx context.Context, feedURL string, limit int) ([]article, error)
 			body = entry.Summary
 		}
 		a := article{Title: cleanText(entry.Title), Body: cleanText(stripArticleHTML(body)), Source: link, Images: extractImageURLs(body, link)}
-		a = enrichArticleFromURL(ctx, a)
-		articles = append(articles, a)
-		if len(articles) >= limit {
-			break
+		articles[i] = enrichArticleFromURL(ctx, a)
+	})
+	return articles, nil
+}
+
+func parallelMap(count, workers int, fn func(int)) {
+	if count <= 0 {
+		return
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > count {
+		workers = count
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				fn(i)
+			}
+		}()
+	}
+	for i := 0; i < count; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func parseFeedDate(values ...string) time.Time {
+	layouts := []string{time.RFC1123Z, time.RFC1123, time.RFC3339, time.RFC3339Nano, time.RFC822Z, time.RFC822, "Mon, 02 Jan 2006 15:04:05 -0700", "2006-01-02T15:04:05-07:00", "2006-01-02"}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		for _, layout := range layouts {
+			if t, err := time.Parse(layout, value); err == nil {
+				return t
+			}
 		}
 	}
-	return articles, nil
+	return time.Time{}
 }
 
 func rssItemArticle(ctx context.Context, item rssItem, isPodcastFeed bool) article {
@@ -1216,16 +1577,58 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []page
 }
 
 func coverPrompt(title, magType string, style magazineStyle, articles []article) string {
-	return limitPrompt(fmt.Sprintf("Create the cover of %q, a %s.\n%s\nSTYLE: %s\nCOVER STYLE: %s\nInclude masthead, issue date, price/barcode or equivalent furniture, strong hierarchy, and avoid: %s. Cover-line story references and final page numbers are added at render time after page ordering is finished.", title, magType, pageFormatInstruction(), styleLine(style, "core"), style.Cover, style.Avoid), 3900)
+	return imagePromptJSON(map[string]any{
+		"task": "Create the magazine cover.",
+		"metadata": map[string]any{
+			"publication":      title,
+			"publication_type": magType,
+			"page_role":        "cover",
+			"language":         emptyDefault(style.Language, "English"),
+			"format":           pageFormatInstruction(),
+		},
+		"style": map[string]any{
+			"issue_style": styleLine(style, "core"),
+			"cover_style": style.Cover,
+		},
+		"content": map[string]any{
+			"masthead":     title,
+			"requirements": "issue date, price/barcode or equivalent cover furniture, strong hierarchy",
+			"cover_lines":  "story references and final page numbers are supplied at render time",
+		},
+		"constraints": []string{"full page visible", "no crop", "consistent print magazine design", "avoid " + style.Avoid},
+	})
 }
 
 func articlePrompt(n int, title string, style magazineStyle, modules, kind string, a article, part, totalParts int) string {
 	taskStyle := styleLine(style, kind)
-	partText := ""
+	series := ""
 	if totalParts > 1 {
-		partText = fmt.Sprintf("\nSERIES: This is page %d of %d for this item. Continue the same story/feature without repeating the same layout.", part, totalParts)
+		series = fmt.Sprintf("This is page %d of %d for this item. Continue the same story/feature without repeating the same layout.", part, totalParts)
 	}
-	return limitPrompt(fmt.Sprintf("Create a %s page for %q.\n%s\nSTYLE: %s\nPAGE STYLE: %s%s\nMODULE IDEAS: %s\nTITLE: %s\nBRIEF/BODY: %s\nLayout with headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful.", kind, title, pageFormatInstruction(), styleLine(style, "content"), taskStyle, partText, modules, a.Title, compact(a.Body, 1900)), 3900)
+	return imagePromptJSON(map[string]any{
+		"task": "Create a print magazine content page.",
+		"metadata": map[string]any{
+			"publication": title,
+			"page_role":   kind,
+			"language":    emptyDefault(style.Language, "English"),
+			"format":      pageFormatInstruction(),
+		},
+		"style": map[string]any{
+			"issue_style": styleLine(style, "content"),
+			"page_style":  taskStyle,
+		},
+		"content": map[string]any{
+			"title":       a.Title,
+			"brief_body":  compact(a.Body, 1900),
+			"series_note": series,
+			"modules":     modules,
+		},
+		"layout": map[string]any{
+			"required_elements": "headline, deck, byline/source if available, readable columns, image slots, captions, pull quote/sidebar where useful",
+			"continuity":        "use the supplied template/reference image for margins, folios, page furniture and grid rhythm",
+		},
+		"constraints": []string{"full page visible", "no crop", "keep page furniture consistent across issue", "avoid " + style.Avoid},
+	})
 }
 
 func normalizedArticlePages(a article) int {
@@ -1239,7 +1642,38 @@ func normalizedArticlePages(a article) int {
 }
 
 func genericPrompt(n int, title string, style magazineStyle, modules, kind, task string) string {
-	return limitPrompt(fmt.Sprintf("Create a %s page for %q.\n%s\nSTYLE: %s\nPAGE STYLE: %s\nIDEAS: %s\nTASK: %s\nKeep header/footer treatment consistent with the issue.", kind, title, pageFormatInstruction(), styleLine(style, "content"), styleLine(style, kind), modules, task), 3900)
+	return imagePromptJSON(map[string]any{
+		"task": task,
+		"metadata": map[string]any{
+			"publication": title,
+			"page_role":   kind,
+			"language":    emptyDefault(style.Language, "English"),
+			"format":      pageFormatInstruction(),
+		},
+		"style": map[string]any{
+			"issue_style": styleLine(style, "content"),
+			"page_style":  styleLine(style, kind),
+		},
+		"content": map[string]any{
+			"module_ideas": modules,
+		},
+		"layout": map[string]any{
+			"continuity": "keep header/footer treatment, folios, margins and grid rhythm consistent with the issue template",
+		},
+		"constraints": []string{"full page visible", "no crop", "fictional brands only unless supplied by article content", "avoid " + style.Avoid},
+	})
+}
+
+func imagePromptJSON(v map[string]any) string {
+	return limitPrompt(compactJSON(v), 3900)
+}
+
+func compactJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(b)
 }
 
 func pageFormatInstruction() string {
@@ -1326,6 +1760,7 @@ func fallbackStyle(style, referencePath string) magazineStyle {
 	}
 	return magazineStyle{
 		Name:       "Custom magazine",
+		Language:   "English",
 		Core:       compact(base, 210),
 		Cover:      "large masthead, confident cover lines, one dominant image, date/price/barcode if fitting",
 		Content:    "consistent grid, clear folios, restrained page furniture, modular image and text rhythm",
@@ -1372,6 +1807,9 @@ func decodeStyle(text string) (magazineStyle, error) {
 	fallback := fallbackStyle("", "")
 	if style.Name == "" {
 		style.Name = fallback.Name
+	}
+	if style.Language == "" {
+		style.Language = fallback.Language
 	}
 	if style.Core == "" {
 		style.Core = fallback.Core
@@ -1469,7 +1907,7 @@ func styleLine(style magazineStyle, kind string) string {
 	default:
 		specific = style.Content
 	}
-	return compact(strings.Join([]string{style.Core, style.Typography, style.Color, style.Print, specific, "Avoid: " + style.Avoid}, " "), 900)
+	return compact(strings.Join([]string{"Language: " + emptyDefault(style.Language, "English"), style.Core, style.Typography, style.Color, style.Print, specific, "Avoid: " + style.Avoid}, " "), 900)
 }
 
 type modulePlanner struct {
@@ -1829,6 +2267,30 @@ func contextWithAPIKey(ctx context.Context, apiKey string) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, apiKeyContextKey{}, apiKey)
+}
+
+func contextWithModels(ctx context.Context, textModel, imageModel string) context.Context {
+	if textModel = strings.TrimSpace(textModel); textModel != "" {
+		ctx = context.WithValue(ctx, textModelContextKey{}, textModel)
+	}
+	if imageModel = strings.TrimSpace(imageModel); imageModel != "" {
+		ctx = context.WithValue(ctx, imageModelContextKey{}, imageModel)
+	}
+	return ctx
+}
+
+func textModelFromContext(ctx context.Context, fallback string) string {
+	if model, _ := ctx.Value(textModelContextKey{}).(string); strings.TrimSpace(model) != "" {
+		return strings.TrimSpace(model)
+	}
+	return fallback
+}
+
+func imageModelFromContext(ctx context.Context, fallback string) string {
+	if model, _ := ctx.Value(imageModelContextKey{}).(string); strings.TrimSpace(model) != "" {
+		return strings.TrimSpace(model)
+	}
+	return fallback
 }
 
 func commandEnv(ctx context.Context) []string {

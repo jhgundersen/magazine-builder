@@ -3,9 +3,12 @@ let lastPlan = null;
 let referencePath = "";
 let workspace = "";
 let apiKey = localStorage.getItem("defapiApiKey") || "";
+let textModel = localStorage.getItem("defapiTextModel") || "claude";
+let imageModel = localStorage.getItem("defapiImageModel") || "gpt2";
 let renderedImages = {};
-let renderedTemplate = null;
+let renderedTemplates = {};
 let templatePrompt = "";
+let pagePool = [];
 let draggedIndex = null;
 let currentStep = 1;
 let busyCount = 0;
@@ -74,21 +77,33 @@ $("changeApiKey").onclick = () => {
   $("apiKeyInput").value = apiKey;
   $("keyGate").classList.remove("hidden");
 };
+function initModelSelectors() {
+  if ($("textModel")) $("textModel").value = textModel;
+  if ($("imageModel")) $("imageModel").value = imageModel;
+  if ($("textModel"))
+    $("textModel").onchange = (e) => {
+      textModel = e.target.value || "claude";
+      localStorage.setItem("defapiTextModel", textModel);
+    };
+  if ($("imageModel"))
+    $("imageModel").onchange = (e) => {
+      imageModel = e.target.value || "gpt2";
+      localStorage.setItem("defapiImageModel", imageModel);
+    };
+}
 document.addEventListener("click", (e) => {
   const button = e.target.closest("[data-template-action]");
   if (!button || button.disabled) return;
   e.preventDefault();
   templatePrompt = getTemplatePrompt();
   if (button.dataset.templateAction === "use") {
-    if (renderedTemplate && renderedTemplate.publicUrl) {
-      withBusy(button, "Rendering...", () =>
-        renderRemainingPages(renderedTemplate.publicUrl),
-      );
+    if (templatesReady()) {
+      withBusy(button, "Rendering...", () => renderRemainingPages());
     }
     return;
   }
   if (button.dataset.templateAction === "refresh" && lastPlan) {
-    renderedTemplate = null;
+    renderedTemplates = {};
     renderPlan(lastPlan);
     withBusy(button, "Regenerating...", () => renderTemplateForReview());
   }
@@ -138,6 +153,7 @@ async function enhanceStyle() {
   fd.append("style", $("style").value);
   fd.append("workspace", workspace);
   fd.append("reference", $("reference").value.trim());
+  fd.append("textModel", textModel);
   const res = await fetch("/api/enhance-style", { method: "POST", body: fd });
   const data = await res.json();
   if (!res.ok) {
@@ -306,6 +322,7 @@ $("generateArticles").onclick = (e) =>
         count: 4,
         workspace,
         apiKey,
+        textModel,
       }),
     });
     const data = await res.json();
@@ -327,17 +344,25 @@ $("generateArticles").onclick = (e) =>
 $("importRSS").onclick = (e) =>
   withBusy(e.currentTarget, "Importing...", async () => {
     if (!(await ensureStyle())) return;
+    const start = parseInt($("rssGroup").value || "0", 10) + 1;
+    const end = start + 9;
     $("rssStatus").textContent =
-      "Fetching articles, extracting pages and rewriting...";
+      "Fetching newest feed items " +
+      start +
+      "-" +
+      end +
+      ", extracting pages and rewriting...";
     const res = await fetch("/api/import-rss", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         url: $("rss").value,
         limit: 10,
+        offset: parseInt($("rssGroup").value || "0", 10),
         style: $("style").value,
         workspace,
         apiKey,
+        textModel,
       }),
     });
     const data = await res.json();
@@ -367,6 +392,7 @@ async function buildPlan() {
     articles,
     workspace,
     apiKey,
+    textModel,
   };
   const out = $("output");
   const defapiTextCalls = estimatePlanDefapiTextCalls();
@@ -401,6 +427,7 @@ async function buildPlan() {
   updateWorkspaceLabel();
   lastPlan.reference = referencePath;
   templatePrompt = templatePrompt || defaultTemplatePrompt(data.style || {});
+  pagePool = buildPagePool(data.pages || []);
   articles = (
     data.articles && data.articles.length ? data.articles : articles
   ).map((a) => Object.assign({ kind: "article", pages: 1 }, a));
@@ -439,17 +466,23 @@ function exportPlanJSON() {
     reference: referencePath,
     templatePrompt,
     workspace,
+    textModel,
+    imageModel,
+    pagePool,
   });
 }
 function importPlanJSON(raw) {
   const data = normalizeImportedPlan(raw);
   lastPlan = data;
   workspace = data.workspace || "";
+  textModel = data.textModel || textModel;
+  imageModel = data.imageModel || imageModel;
+  initModelSelectors();
   referencePath = data.reference || data.referencePath || "";
   templatePrompt =
     data.templatePrompt || defaultTemplatePrompt((data && data.style) || {});
   renderedImages = {};
-  renderedTemplate = null;
+  renderedTemplates = {};
   isRendering = false;
   if (data.title || (data.style && data.style.name)) {
     $("title").value = data.title || data.style.name;
@@ -466,6 +499,7 @@ function importPlanJSON(raw) {
       ? data.articles
       : uniquePlannedArticles(data.pages)
   ).map((a) => Object.assign({ kind: "article", pages: 1 }, a));
+  pagePool = buildPagePool(data.pagePool || data.pages || []);
   renumberPages();
   renderArticles();
   updateWorkspaceLabel();
@@ -583,11 +617,38 @@ function defaultTemplatePrompt(style) {
     style && style.template
       ? style.template
       : "blank content-page production dummy with header, folio, grid and image boxes";
-  return (
-    "Create one completely text-free magazine page layout template.\nFORMAT: Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.\nTEMPLATE: " +
-    styleText +
-    "\nShow only generic layout geometry: paper texture, margins, column rhythm, blank header band, blank footer band, empty image rectangles, pale rule lines and subtle placeholder blocks. Absolutely no readable text, no letters, no numbers, no masthead, no captions, no labels, no arrows, no registration marks, no technical print marks, no UI and no moodboard."
-  );
+  const language = (style && style.language) || "English";
+  return JSON.stringify({
+    task: "Create one reusable magazine content-page template image used as a style reference for later pages.",
+    metadata: {
+      page_role: "template",
+      language,
+      format:
+        "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
+      purpose: "shared layout memory for subsequent page generations",
+    },
+    style: {
+      template: styleText,
+    },
+    layout: {
+      structure:
+        "consistent margins, column rhythm, image placeholders, article text placeholders and restrained page furniture",
+      example_header:
+        "small localized running header in " +
+        language +
+        " with publication/section treatment, matching the style",
+      example_footer:
+        "small localized footer folio in " +
+        language +
+        " with the page number on the outer edge and a simple rule or section marker",
+    },
+    constraints: [
+      "keep template generic, not a finished article",
+      "body copy areas must be abstract unreadable grey text-block lines",
+      "only the tiny sample header/footer/folio may contain readable text or numbers",
+      "no masthead, captions, labels, arrows, registration marks, printing press marks, UI or moodboard",
+    ],
+  });
 }
 function renderPlan(data) {
   const kit =
@@ -598,9 +659,9 @@ function renderPlan(data) {
     currentStep === 4 && $("renderOutput") ? $("renderOutput") : $("output");
   if (!target) return;
   target.innerHTML =
-    '<div class="kit"><strong>Style JSON</strong>\n' +
+    '<div class="kit"><label>Style JSON</label><textarea class="prompt style-json" data-style-json>' +
     esc(JSON.stringify(data.style || {}, null, 2)) +
-    "\n\n<strong>Creative kit</strong>\n" +
+    '</textarea><div class="status" id="styleJsonStatus">Edit style JSON to update later prompts and templates.</div>\n<strong>Creative kit</strong>\n' +
     esc(kit) +
     "</div>" +
     unplannedNoticeHTML() +
@@ -608,6 +669,7 @@ function renderPlan(data) {
     pageGridHTML(data.pages || []) +
     "</div>";
   wirePromptEditors();
+  wireStyleEditor();
   wireSwapEditors();
   wireTemplateActions();
   wireDrag();
@@ -617,12 +679,13 @@ function pageGridHTML(pages) {
   let html = '<div class="top-pair">' + cover + templateCardHTML() + "</div>";
   const rest = pages.slice(1);
   for (let i = 0; i < rest.length; i += 2) {
+    const second = rest[i + 1] ? pageHTML(rest[i + 1], i + 2) : "";
     html +=
-      '<div class="spread">' +
+      '<div class="spread ' +
+      (second ? "" : "single") +
+      '">' +
       pageHTML(rest[i], i + 1) +
-      (rest[i + 1]
-        ? pageHTML(rest[i + 1], i + 2)
-        : '<article class="page fixed"><span class="kind">blank</span><h3>Inside cover</h3><div class="preview"></div></article>') +
+      second +
       "</div>";
   }
   return html;
@@ -669,8 +732,8 @@ function pageHTML(p, i) {
   );
 }
 function swapHTML(p, i, fixed) {
-  if (isRendering || fixed || !p.article) return "";
-  const opts = unplannedArticleEntries();
+  if (isRendering || fixed) return "";
+  const opts = unplannedPageEntries();
   if (!opts.length) return "";
   return (
     '<label>Swap with unplaced</label><select data-swap-i="' +
@@ -680,12 +743,9 @@ function swapHTML(p, i, fixed) {
       .map(
         (item) =>
           '<option value="' +
-          item.index +
+          item.key +
           '">' +
-          esc(
-            (item.article.kind === "feature" ? "Feature: " : "Article: ") +
-              (item.article.title || "Untitled"),
-          ) +
+          esc(pageOptionLabel(item.page)) +
           "</option>",
       )
       .join("") +
@@ -697,26 +757,98 @@ function wireSwapEditors() {
     (el) =>
       (el.onchange = (e) => {
         const i = +e.target.dataset.swapI;
-        const articleIndex = parseInt(e.target.value, 10);
-        if (!Number.isFinite(articleIndex) || !lastPlan || !lastPlan.pages[i])
-          return;
-        const a = articles[articleIndex];
-        if (!a) return;
-        const page = lastPlan.pages[i];
-        page.article = Object.assign({ kind: "article", pages: 1 }, a);
-        page.kind = page.article.kind || "article";
-        page.title = page.article.title || "Untitled";
-        page.images = page.article.images || [];
-        page.prompt = buildArticlePromptClient(page, page.article);
-        delete renderedImages[page.number];
+        const key = e.target.value;
+        if (!key || !lastPlan || !lastPlan.pages[i]) return;
+        const entry = unplannedPageEntries().find((item) => item.key === key);
+        if (!entry) return;
+        const number = lastPlan.pages[i].number;
+        lastPlan.pages[i] = clonePageForSlot(entry.page, number);
+        delete renderedImages[number];
         renderPlan(lastPlan);
       }),
   );
+}
+function buildPagePool(pages) {
+  const seen = new Set();
+  const pool = [];
+  (pages || []).forEach((page, i) => {
+    if (i === 0 || i === (pages || []).length - 1) return;
+    const p = clonePageForSlot(page, page.number || i + 1);
+    const key = pagePoolKey(p);
+    if (seen.has(key)) return;
+    seen.add(key);
+    pool.push(p);
+  });
+  (articles || []).forEach((article) => {
+    const p = {
+      number: 0,
+      kind: article.kind || "article",
+      title: article.title || "Untitled",
+      article: Object.assign({ kind: "article", pages: 1 }, article),
+      images: article.images || [],
+      prompt: "",
+    };
+    p.prompt = buildArticlePromptClient(p, p.article);
+    const key = pagePoolKey(p);
+    if (!seen.has(key)) {
+      seen.add(key);
+      pool.push(p);
+    }
+  });
+  return pool;
+}
+function clonePageForSlot(page, number) {
+  const cloned = JSON.parse(JSON.stringify(page || {}));
+  cloned.number = number;
+  if (cloned.article) {
+    cloned.images = cloned.article.images || cloned.images || [];
+  }
+  return cloned;
+}
+function pagePoolKey(page) {
+  const article = page.article || {};
+  if (page.article) {
+    return [
+      "article",
+      article.kind || page.kind || "article",
+      article.title || page.title || "",
+      article.source || "",
+      article.body || "",
+    ].join("\u001f");
+  }
+  return [page.kind || "article", page.title || "", page.prompt || ""].join(
+    "\u001f",
+  );
+}
+function plannedPageKeys() {
+  return new Set(
+    (lastPlan && lastPlan.pages ? lastPlan.pages : [])
+      .slice(1, -1)
+      .map((page) => pagePoolKey(page)),
+  );
+}
+function unplannedPageEntries() {
+  const planned = plannedPageKeys();
+  return (pagePool || [])
+    .map((page) => ({ page, key: pagePoolKey(page) }))
+    .filter((item) => !planned.has(item.key));
+}
+function pageOptionLabel(page) {
+  const prefix =
+    page.kind === "advert"
+      ? "Advert"
+      : page.kind === "feature"
+        ? "Feature"
+        : page.kind === "filler"
+          ? "Department"
+          : "Article";
+  return prefix + ": " + (page.title || "Untitled");
 }
 function buildArticlePromptClient(page, a) {
   const style = (lastPlan && lastPlan.style) || {};
   const kind = a.kind || "article";
   const styleText = [
+    "Language: " + (style.language || "English"),
     style.core,
     style.content,
     kind === "feature" ? style.feature : style.short,
@@ -727,35 +859,53 @@ function buildArticlePromptClient(page, a) {
   ]
     .filter(Boolean)
     .join(" ");
-  return (
-    "Create a " +
-    kind +
-    " page for " +
-    JSON.stringify($("title").value || "Untitled Magazine") +
-    ".\nFORMAT: Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.\nSTYLE: " +
-    styleText +
-    "\nTITLE: " +
-    (a.title || "Untitled") +
-    "\nBRIEF/BODY: " +
-    (a.body || "") +
-    "\nLayout with headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful."
-  );
+  return JSON.stringify({
+    task: "Create a print magazine content page.",
+    metadata: {
+      publication: $("title").value || "Untitled Magazine",
+      page_role: kind,
+      language: style.language || "English",
+      format:
+        "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
+    },
+    style: {
+      issue_style: styleText,
+    },
+    content: {
+      title: a.title || "Untitled",
+      brief_body: a.body || "",
+    },
+    layout: {
+      required_elements:
+        "headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful",
+      continuity:
+        "use the supplied template/reference image for margins, folios, page furniture and grid rhythm",
+    },
+    constraints: ["full page visible", "no crop"],
+  });
 }
 function templateCardHTML() {
-  const ready = renderedTemplate && renderedTemplate.publicUrl;
-  const img =
-    renderedTemplate && renderedTemplate.image
-      ? '<img class="preview" src="' + esc(renderedTemplate.image) + '">'
+  const ready = templatesReady();
+  const leftImg =
+    renderedTemplates.left && renderedTemplates.left.image
+      ? '<img class="preview" src="' + esc(renderedTemplates.left.image) + '">'
+      : '<div class="preview"></div>';
+  const rightImg =
+    renderedTemplates.right && renderedTemplates.right.image
+      ? '<img class="preview" src="' + esc(renderedTemplates.right.image) + '">'
       : '<div class="preview"></div>';
   const status = ready
-    ? "Review before rendering content pages"
-    : "Template placeholder, edit prompt before rendering";
+    ? "Review left and right templates before rendering content pages"
+    : "Template placeholders, edit base prompt before rendering";
   return (
     '<article class="page fixed"><span class="kind">template</span><h3>Template</h3><div class="page-status">' +
     status +
     "</div>" +
-    img +
-    '<label>Template prompt</label><textarea class="prompt" data-template-prompt>' +
+    '<div class="template-pair"><div><span class="kind">left</span>' +
+    leftImg +
+    '</div><div><span class="kind">right</span>' +
+    rightImg +
+    '</div></div><label>Template base prompt</label><textarea class="prompt" data-template-prompt>' +
     esc(
       templatePrompt ||
         defaultTemplatePrompt((lastPlan && lastPlan.style) || {}),
@@ -765,6 +915,14 @@ function templateCardHTML() {
     '>✓ Use</button><button data-template-action="refresh" class="ghost" ' +
     (lastPlan ? "" : "disabled") +
     ">↻ Refresh</button></div></article>"
+  );
+}
+function templatesReady() {
+  return (
+    renderedTemplates.left &&
+    renderedTemplates.left.publicUrl &&
+    renderedTemplates.right &&
+    renderedTemplates.right.publicUrl
   );
 }
 function getTemplatePrompt() {
@@ -793,6 +951,27 @@ function wirePromptEditors() {
       }),
   );
 }
+function wireStyleEditor() {
+  document.querySelectorAll("[data-style-json]").forEach((el) => {
+    el.oninput = (e) => {
+      if (!lastPlan) return;
+      try {
+        const nextStyle = JSON.parse(e.target.value || "{}");
+        lastPlan.style = nextStyle;
+        $("style").value = JSON.stringify(nextStyle, null, 2);
+        templatePrompt = defaultTemplatePrompt(nextStyle);
+        pagePool = buildPagePool(lastPlan.pages || []);
+        const status = $("styleJsonStatus");
+        if (status) status.textContent = "Style JSON applied.";
+      } catch (err) {
+        const status = $("styleJsonStatus");
+        if (status)
+          status.textContent =
+            "Invalid JSON: " + (err.message || "check syntax");
+      }
+    };
+  });
+}
 function showUnplannedNotice(data) {
   const out = $("output");
   if (out) {
@@ -801,12 +980,12 @@ function showUnplannedNotice(data) {
   }
 }
 function unplannedNoticeHTML() {
-  const missing = unplannedArticles();
+  const missing = unplannedPageEntries();
   if (!missing.length) return "";
   return (
     '<div class="kit"><strong>Not placed</strong> ' +
     missing.length +
-    " article/feature item(s) did not fit in the selected page count. Use the swap dropdown on a planned article page, increase pages, shorten page counts, or remove items.</div>"
+    " page option(s) are available, including unused articles, adverts, or department pages. Use the swap dropdown on any middle page to place them.</div>"
   );
 }
 function unplannedArticles() {
@@ -899,9 +1078,9 @@ async function startRenderFlow() {
   isRendering = true;
   showStep(4);
   renderedImages = {};
-  renderedTemplate = null;
+  renderedTemplates = {};
   $("templateReview").innerHTML = "";
-  renderCallTotal = 2 + Math.max(0, lastPlan.pages.length - 1) + 1;
+  renderCallTotal = 3 + Math.max(0, lastPlan.pages.length - 1) + 1;
   renderCallDone = 0;
   $("renderStatus").innerHTML = progressHTML(
     "Starting defapi image call 1 of " + renderCallTotal + "...",
@@ -910,6 +1089,9 @@ async function startRenderFlow() {
   );
   renderPlan(lastPlan);
   try {
+    setRenderProgress("Planning cover lines");
+    lastPlan.coverPlan = await generateCoverPlan();
+    completeRenderCall("Cover plan ready");
     setRenderProgress("Rendering cover");
     let cover = await renderPage(lastPlan.pages[0], "");
     renderedImages[1] = cover;
@@ -924,14 +1106,17 @@ async function startRenderFlow() {
   }
 }
 async function renderTemplateForReview() {
-  setRenderProgress("Rendering shared content template");
-  const template = await renderTemplate();
-  completeRenderCall("Template rendered");
-  renderedTemplate = template;
-  const templateRef = template.publicUrl || "";
-  if (!templateRef) {
+  setRenderProgress("Rendering left and right content templates");
+  const [left, right] = await Promise.all([
+    renderTemplate("left"),
+    renderTemplate("right"),
+  ]);
+  completeRenderCall("Left template rendered");
+  completeRenderCall("Right template rendered");
+  renderedTemplates = { left, right };
+  if (!templatesReady()) {
     $("renderStatus").textContent =
-      "Template rendered, but defapi image did not return a public Image URL. Check workspace log.";
+      "Templates rendered, but defapi image did not return both public Image URLs. Check workspace log.";
     isRendering = false;
     renderPlan(lastPlan);
     return;
@@ -941,16 +1126,39 @@ async function renderTemplateForReview() {
     '<p class="muted">Use ✓ or refresh ↻ on the template card.</p>';
   renderPlan(lastPlan);
 }
-async function renderRemainingPages(templateRef) {
+async function generateCoverPlan() {
+  const res = await fetch("/api/cover-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: $("title").value,
+      style: lastPlan.style || {},
+      pages: lastPlan.pages || [],
+      workspace,
+      apiKey,
+      textModel,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "cover plan failed");
+  workspace = data.workspace || workspace;
+  updateWorkspaceLabel();
+  return data.coverPlan || null;
+}
+async function renderRemainingPages() {
   try {
     $("templateReview").innerHTML = "";
-    renderedTemplate = null;
     const middle = lastPlan.pages.slice(1);
     setRenderProgress("Rendering content pages");
     for (let i = 0; i < middle.length; i += 3) {
       await Promise.all(
         middle.slice(i, i + 3).map(async (p) => {
           setStatus(p.number, "Defapi image call queued...");
+          const side = p.number % 2 === 0 ? "left" : "right";
+          const templateRef =
+            renderedTemplates[side] && renderedTemplates[side].publicUrl
+              ? renderedTemplates[side].publicUrl
+              : "";
           const img = await renderPage(p, templateRef);
           renderedImages[p.number] = img;
           completeRenderCall("Rendered page " + p.number);
@@ -1008,7 +1216,7 @@ async function renderRemainingPages(templateRef) {
     renderPlan(lastPlan);
   }
 }
-async function renderTemplate() {
+async function renderTemplate(side) {
   templatePrompt = getTemplatePrompt();
   const res = await fetch("/api/render-template", {
     method: "POST",
@@ -1018,12 +1226,52 @@ async function renderTemplate() {
       reference: referencePath,
       workspace,
       apiKey,
-      prompt: templatePrompt,
+      textModel,
+      imageModel,
+      side,
+      prompt: sideTemplatePrompt(templatePrompt, side),
     }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "template failed");
   return { image: data.image, publicUrl: data.publicUrl || "" };
+}
+function sideTemplatePrompt(basePrompt, side) {
+  const style = (lastPlan && lastPlan.style) || {};
+  const language = style.language || "English";
+  const pageNumber = side === "right" ? 3 : 2;
+  const outer = side === "right" ? "right" : "left";
+  try {
+    const prompt = JSON.parse(String(basePrompt || "{}"));
+    prompt.metadata = Object.assign({}, prompt.metadata || {}, {
+      side: side + "-hand page",
+      language,
+    });
+    prompt.layout = Object.assign({}, prompt.layout || {}, {
+      example_footer:
+        "localized footer in " +
+        language +
+        " with page number " +
+        pageNumber +
+        " on the " +
+        outer +
+        " outer edge",
+    });
+    return JSON.stringify(prompt);
+  } catch (_) {
+    return (
+      String(basePrompt || "") +
+      "\n\nSIDE: " +
+      side +
+      "-hand page. LANGUAGE: " +
+      language +
+      ". Put page number " +
+      pageNumber +
+      " on the " +
+      outer +
+      " outer edge."
+    );
+  }
 }
 async function renderPage(page, styleReference) {
   setStatus(page.number, "Rendering...");
@@ -1040,6 +1288,7 @@ async function renderPage(page, styleReference) {
       reference: ref,
       workspace,
       apiKey,
+      imageModel,
     }),
   });
   const data = await res.json();
@@ -1053,23 +1302,66 @@ async function renderPage(page, styleReference) {
 function finalRenderPrompt(page) {
   const side = page.number % 2 === 0 ? "left-hand page" : "right-hand page";
   const folioSide = page.number % 2 === 0 ? "left" : "right";
-  let extra =
-    "\n\nRENDER POSITION: This is page " +
-    page.number +
-    ", a " +
-    side +
-    ". Put page number " +
-    page.number +
-    " on the " +
-    folioSide +
-    " side in the footer.";
+  const renderPosition = {
+    page_number: page.number,
+    side,
+    language: ((lastPlan && lastPlan.style) || {}).language || "English",
+    footer_folio:
+      "Put page number " +
+      page.number +
+      " on the " +
+      folioSide +
+      " side in the footer.",
+  };
   if (page.kind === "cover") {
-    extra +=
-      "\nCOVER CONTENTS: Use cover lines for the actual final page order: " +
-      coverLinePages() +
-      ". These page numbers are final after reordering.";
+    renderPosition.cover_plan = lastPlan.coverPlan || {
+      lines: coverLinePages(),
+    };
   }
-  return String(page.prompt || "") + extra;
+  try {
+    const prompt = JSON.parse(String(page.prompt || "{}"));
+    prompt.metadata = Object.assign({}, prompt.metadata || {}, {
+      language: ((lastPlan && lastPlan.style) || {}).language || "English",
+    });
+    prompt.style = Object.assign({}, prompt.style || {}, {
+      issue_style: stylePromptText(page.kind || "content"),
+    });
+    prompt.render_position = renderPosition;
+    return JSON.stringify(prompt);
+  } catch (_) {
+    return JSON.stringify({
+      task: "Create the requested magazine page.",
+      source_prompt: String(page.prompt || ""),
+      render_position: renderPosition,
+    });
+  }
+}
+function stylePromptText(kind) {
+  const style = (lastPlan && lastPlan.style) || {};
+  const specific =
+    kind === "cover"
+      ? style.cover
+      : kind === "feature"
+        ? style.feature
+        : kind === "advert"
+          ? style.advert
+          : kind === "filler"
+            ? style.filler
+            : kind === "back-page"
+              ? style.back
+              : style.content || style.short;
+  return [
+    "Language: " + (style.language || "English"),
+    style.core,
+    style.typography,
+    style.color,
+    style.print,
+    style.content,
+    specific,
+    style.avoid ? "Avoid: " + style.avoid : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 function coverLinePages() {
   if (!lastPlan || !lastPlan.pages) return "inside stories";
@@ -1089,6 +1381,7 @@ function setStatus(n, msg) {
   if (el) el.textContent = msg;
 }
 renderArticles();
+initModelSelectors();
 updateWorkspaceLabel();
 showStep(1);
 requireApiKey();
