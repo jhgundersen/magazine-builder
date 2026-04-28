@@ -764,7 +764,7 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 		bodySample = sampleLongText(a.Body, 6500)
 		maxTokens = 1600
 	}
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Rewrite this imported source into print-ready magazine copy matching the style and text tone. Keep facts, names, chronology, arguments, concrete examples and useful nuance. Remove web/navigation language, links, embeds, YouTube mentions, newsletter prompts, transcript mechanics and SEO clutter. Title should fit the publication voice. Body should be %s characters, in coherent paragraphs, ready for page layout.\n\nSTYLE AND TONE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s", bodyRange, styleLine(style, "article"), a.Title, bodySample)
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Rewrite this imported source into print-ready magazine copy matching the publication concept, style and text tone. If the publication is comic-led, satirical, tabloid, puzzle-like, literary, technical, or otherwise strongly formatted, make the copy sound and structure fit that format. Keep facts, names, chronology, arguments, concrete examples and useful nuance. Remove web/navigation language, links, embeds, YouTube mentions, newsletter prompts, transcript mechanics and SEO clutter. Title should fit the publication voice. Body should be %s characters, in coherent paragraphs or short page-ready chunks as the style demands.\n\nSTYLE AND TONE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s", bodyRange, styleLine(style, "article"), a.Title, bodySample)
 	text, err := s.runDefapiText(ctx, prompt, maxTokens)
 	if err != nil {
 		return a, err
@@ -2074,15 +2074,8 @@ func limitPrompt(s string, max int) string {
 	if max <= 0 || len([]rune(s)) <= max {
 		return s
 	}
-	note := "\n\n[Prompt shortened: keep page task, style, title, number, and main content.] "
 	r := []rune(s)
-	noteRunes := []rune(note)
-	head := (max - len(noteRunes)) * 2 / 3
-	tail := max - len(noteRunes) - head
-	if head < 1 || tail < 1 {
-		return string(r[:max])
-	}
-	return string(r[:head]) + note + string(r[len(r)-tail:])
+	return string(r[:max])
 }
 
 func uniqueStrings(in []string) []string {

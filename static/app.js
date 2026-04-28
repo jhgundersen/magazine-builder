@@ -1118,27 +1118,114 @@ function finalRenderPrompt(page) {
   }
   try {
     const prompt = JSON.parse(String(page.prompt || "{}"));
+    delete prompt.source_prompt;
     prompt.metadata = Object.assign({}, prompt.metadata || {}, {
       language: ((lastPlan && lastPlan.style) || {}).language || "English",
       tone: ((lastPlan && lastPlan.style) || {}).tone || "editorial",
     });
     prompt.style = {
       visual_brief: visualStyleBrief(page.kind || "content"),
-      creative_kit:
-        lastPlan && lastPlan.creativeKit ? lastPlan.creativeKit : {},
+      creative_kit: creativeKitForPage(page.kind || "content"),
     };
     if (prompt.layout) {
       delete prompt.layout.continuity;
     }
+    if (prompt.content && prompt.content.brief_body) {
+      prompt.content.brief_body = compactClient(
+        prompt.content.brief_body,
+        1300,
+      );
+    }
     prompt.render_position = renderPosition;
-    return JSON.stringify(prompt);
+    return fitPromptJSON(prompt);
   } catch (_) {
-    return JSON.stringify({
-      task: "Create the requested magazine page.",
-      source_prompt: String(page.prompt || ""),
-      render_position: renderPosition,
-    });
+    const prompt = cleanPromptFromPage(page);
+    prompt.render_position = renderPosition;
+    return fitPromptJSON(prompt);
   }
+}
+function fitPromptJSON(prompt) {
+  let out = JSON.stringify(prompt);
+  if (out.length <= 3800) return out;
+  if (prompt.content && prompt.content.brief_body) {
+    prompt.content.brief_body = compactClient(prompt.content.brief_body, 900);
+  }
+  out = JSON.stringify(prompt);
+  if (out.length <= 3800) return out;
+  if (prompt.style && prompt.style.visual_brief) {
+    prompt.style.visual_brief = compactClient(prompt.style.visual_brief, 850);
+  }
+  out = JSON.stringify(prompt);
+  if (out.length <= 3800) return out;
+  if (prompt.style && prompt.style.creative_kit) {
+    delete prompt.style.creative_kit;
+  }
+  return JSON.stringify(prompt);
+}
+function cleanPromptFromPage(page) {
+  const style = (lastPlan && lastPlan.style) || {};
+  const article = page.article || {};
+  const body = article.body || page.body || "";
+  return {
+    task:
+      page.kind === "cover"
+        ? "Create the magazine cover."
+        : page.kind === "advert"
+          ? "Create a fictional advert page for this publication."
+          : "Create a print magazine content page.",
+    metadata: {
+      publication: $("title").value || "Untitled Magazine",
+      page_role: page.kind || "article",
+      language: style.language || "English",
+      tone: style.tone || "editorial",
+      format:
+        "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
+    },
+    style: {
+      visual_brief: visualStyleBrief(page.kind || "content"),
+      creative_kit: creativeKitForPage(page.kind || "content"),
+    },
+    content: {
+      title: page.title || article.title || "Untitled",
+      brief_body: compactClient(body, 1500),
+      modules: pageModules(page),
+    },
+    layout: {
+      required_elements:
+        "headline, deck, byline/source if available, readable columns, image or comic illustration slots, captions, pull quote/sidebar where useful",
+    },
+    constraints: [
+      "full page visible",
+      "no crop",
+      style.avoid ? "avoid " + style.avoid : "",
+    ].filter(Boolean),
+  };
+}
+function compactClient(s, max) {
+  s = String(s || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return s.length > max ? s.slice(0, max).trim() + "..." : s;
+}
+function pageModules(page) {
+  if (page.content && page.content.modules) return page.content.modules;
+  try {
+    const prompt = JSON.parse(String(page.prompt || "{}"));
+    return prompt.content && prompt.content.modules
+      ? prompt.content.modules
+      : "";
+  } catch (_) {
+    return "";
+  }
+}
+function creativeKitForPage(kind) {
+  const kit = (lastPlan && lastPlan.creativeKit) || {};
+  const take = (arr) => (Array.isArray(arr) ? arr.slice(0, 5) : []);
+  if (kind === "advert") return { adverts: take(kit.adverts) };
+  if (kind === "back-page") return { backPage: take(kit.backPage) };
+  if (kind === "filler")
+    return { departments: take(kit.departments), sidebars: take(kit.sidebars) };
+  return { sidebars: take(kit.sidebars), captions: take(kit.captions) };
 }
 function visualStyleBrief(kind) {
   const style = (lastPlan && lastPlan.style) || {};
