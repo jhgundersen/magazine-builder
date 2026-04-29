@@ -215,6 +215,19 @@ type generatedImage struct {
 	PublicURL string
 }
 
+type articleLogEntry struct {
+	Index      int      `json:"index"`
+	Title      string   `json:"title"`
+	Source     string   `json:"source,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
+	Enhanced   bool     `json:"enhanced,omitempty"`
+	BodyChars  int      `json:"bodyChars"`
+	Body       string   `json:"body,omitempty"`
+	BodySample string   `json:"bodySample,omitempty"`
+	Images     []string `json:"images,omitempty"`
+	Error      string   `json:"error,omitempty"`
+}
+
 type pdfRequest struct {
 	Images    []string `json:"images"`
 	Title     string   `json:"title"`
@@ -588,12 +601,15 @@ func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
 	enhanced, err := s.enhanceStyle(ctx, title, style, referencePath)
 	if err != nil {
 		log.Printf("defapi text style enhancement failed: %v", err)
+		s.workspaceLog(workspace, "style: enhancement failed: %v", err)
 		enhanced = fallbackStyle(style, referencePath)
 	}
 	if title != "" {
 		enhanced.Name = title
 	}
 	styleJSON, _ := json.MarshalIndent(enhanced, "", "  ")
+	s.workspaceLog(workspace, "style: source title=%q reference=%q user_style=%q", title, referencePath, compact(style, 1200))
+	s.workspaceLogJSON(workspace, "style: enhanced JSON", enhanced)
 	writeJSON(w, styleResponse{EnhancedStyle: string(styleJSON), Style: enhanced, ReferencePath: referencePath, Workspace: workspace})
 }
 
@@ -619,17 +635,28 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.workspaceLog(workspace, "rss-import: start url=%q offset=%d limit=%d", req.URL, req.Offset, req.Limit)
 	articles, err := fetchRSS(ctx, req.URL, req.Offset, req.Limit)
 	if err != nil {
+		s.workspaceLog(workspace, "rss-import: fetch failed: %v", err)
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
 	style := parseStyle(req.Style)
+	s.workspaceLogJSON(workspace, "rss-import: style JSON", style)
+	rawEntries := make([]articleLogEntry, len(articles))
+	for i, a := range articles {
+		rawEntries[i] = articleLogEntryFromArticle(i, a, false)
+	}
+	s.workspaceLogJSON(workspace, "rss-import: extracted articles", rawEntries)
+	rewriteEntries := make([]articleLogEntry, len(articles))
 	parallelMap(len(articles), 3, func(i int) {
 		if articles[i].Kind == "podcast" && len([]rune(articles[i].Body)) > 5000 {
 			summarized, err := s.summarizePodcastForImport(ctx, articles[i], style)
 			if err != nil {
 				log.Printf("defapi text podcast summary failed for %q: %v", articles[i].Title, err)
+				rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], false)
+				rewriteEntries[i].Error = fmt.Sprintf("podcast summary failed: %v", err)
 				articles[i].Body = sampleLongText(articles[i].Body, 4800)
 			} else {
 				articles[i].Title = summarized.Title
@@ -639,12 +666,25 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		improved, err := s.rewriteArticleForStyle(ctx, articles[i], style)
 		if err != nil {
 			log.Printf("defapi text article rewrite failed for %q: %v", articles[i].Title, err)
+			rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], false)
+			if rewriteEntries[i].Error != "" {
+				rewriteEntries[i].Error += "; "
+			}
+			rewriteEntries[i].Error += fmt.Sprintf("article rewrite failed: %v", err)
 			return
 		}
 		articles[i].Title = improved.Title
 		articles[i].Body = improved.Body
 		articles[i].Enhanced = true
+		rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], true)
 	})
+	for i := range rewriteEntries {
+		if rewriteEntries[i].Title == "" && rewriteEntries[i].Body == "" && rewriteEntries[i].Error == "" {
+			rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], true)
+		}
+	}
+	s.workspaceLogJSON(workspace, "rss-import: rewritten articles", rewriteEntries)
+	s.workspaceLog(workspace, "rss-import: complete articles=%d rewritten=%d", len(articles), countEnhancedArticles(articles))
 	writeJSON(w, map[string]any{"articles": articles, "workspace": workspace})
 }
 
@@ -710,6 +750,8 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	s.workspaceLog(workspace, "build: start title=%q articles=%d pages=%d", req.Title, len(req.Articles), req.PageCount)
+	s.workspaceLogJSON(workspace, "build: style JSON", style)
+	s.workspaceLogJSON(workspace, "build: input articles", articleLogEntries(req.Articles, false))
 	for i := range req.Articles {
 		if req.Articles[i].Enhanced {
 			continue
@@ -724,12 +766,14 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			log.Printf("defapi text manual article rewrite failed for %q: %v", req.Articles[i].Title, err)
+			s.workspaceLog(workspace, "build: rewrite failed index=%d title=%q error=%v", i, req.Articles[i].Title, err)
 			done++
 			s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewrite failed for %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
 			continue
 		}
 		improved.Enhanced = true
 		req.Articles[i] = improved
+		s.workspaceLogJSON(workspace, fmt.Sprintf("build: rewritten article index=%d", i), articleLogEntryFromArticle(i, req.Articles[i], true))
 		done++
 		s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewritten %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
 	}
@@ -740,6 +784,8 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		s.workspaceLog(workspace, "build: creative kit failed: %v", err)
 		kit = fallbackCreativeKit(req)
 	}
+	s.workspaceLogJSON(workspace, "build: final articles", articleLogEntries(req.Articles, true))
+	s.workspaceLogJSON(workspace, "build: creative kit JSON", kit)
 	done++
 	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Plan ready", Running: false})
 	completed = true
@@ -880,6 +926,15 @@ func (s *server) workspaceLog(workspace, format string, args ...any) {
 	_, _ = f.WriteString(line)
 }
 
+func (s *server) workspaceLogJSON(workspace, label string, v any) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		s.workspaceLog(workspace, "%s: json encode failed: %v", label, err)
+		return
+	}
+	s.workspaceLog(workspace, "%s:\n%s", label, data)
+}
+
 func (s *server) setProgress(workspace string, status progressStatus) {
 	workspace = sanitizeWorkspace(workspace)
 	if workspace == "" {
@@ -943,7 +998,7 @@ func newWorkspaceID(title string) string {
 }
 
 func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath string) (magazineStyle, error) {
-	prompt := "Return only valid compact JSON for a reusable magazine/newspaper style. No markdown. Keep each field under 220 characters so later image prompts stay under 4000 chars. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, typography, color, print, avoid. The name field must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". The language field must be the publication language inferred from the user style/title, such as English, Norwegian Bokmal, French, etc. The tone field must describe the text voice for article rewrites and generated page furniture. Define guidance for cover, normal content pages, feature articles, short articles, adverts, filler/departments and back page. Include consistent header, footer, folio and grid guidance in content/core rather than a separate template page.\n\nUser style:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
+	prompt := "Return only valid compact JSON for a reusable magazine/newspaper/comic style. No markdown. Keep each field under 260 characters so later image prompts stay under 4000 chars. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, typography, color, print, avoid. The name field must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". The language field must be the publication language inferred from the user style/title, such as English, Norwegian Bokmal, French, etc. The tone field must describe the text voice for article rewrites and generated page furniture. If the user asks for a comic, satire, parody, hysterical/adult humor, tabloid, puzzle, or other strong format, do not flatten it into a normal respectable magazine. Put explicit structural instructions into content, feature, short, filler and back: panels, cartoons, captions, recurring gags, fake departments, absurd infographics, pull-quotes, punchlines, and visual comedy. Adult comic means aimed at grown-ups, not explicit or vulgar unless the user asks. Define guidance for cover, normal content pages, feature articles, short articles, adverts, filler/departments and back page. Include consistent header, footer, folio and grid guidance in content/core rather than a separate template page.\n\nUser style:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
 	if referencePath != "" {
 		prompt += "\n\nReference image URL: " + referencePath + "\nUse this URL as visual inspiration for palette, typography mood, texture and layout feeling, but describe the reusable style in words."
 	}
@@ -1691,6 +1746,7 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article)
 			"page_role":        "cover",
 			"language":         emptyDefault(style.Language, "English"),
 			"format":           pageFormatInstruction(),
+			"tone":             emptyDefault(style.Tone, "editorial"),
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, "cover"),
@@ -1716,6 +1772,7 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 			"page_role":   kind,
 			"language":    emptyDefault(style.Language, "English"),
 			"format":      pageFormatInstruction(),
+			"tone":        emptyDefault(style.Tone, "editorial"),
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, kind),
@@ -1751,6 +1808,7 @@ func genericPrompt(n int, title string, style magazineStyle, modules, kind, task
 			"page_role":   kind,
 			"language":    emptyDefault(style.Language, "English"),
 			"format":      pageFormatInstruction(),
+			"tone":        emptyDefault(style.Tone, "editorial"),
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, kind),
@@ -1836,6 +1894,44 @@ func cleanArticles(in []article) []article {
 		out = append(out, a)
 	}
 	return out
+}
+
+func articleLogEntries(articles []article, includeBody bool) []articleLogEntry {
+	out := make([]articleLogEntry, 0, len(articles))
+	for i, a := range articles {
+		out = append(out, articleLogEntryFromArticle(i, a, includeBody))
+	}
+	return out
+}
+
+func articleLogEntryFromArticle(i int, a article, includeBody bool) articleLogEntry {
+	body := ""
+	bodySample := compact(a.Body, 1000)
+	if includeBody {
+		body = a.Body
+		bodySample = ""
+	}
+	return articleLogEntry{
+		Index:      i,
+		Title:      a.Title,
+		Source:     a.Source,
+		Kind:       a.Kind,
+		Enhanced:   a.Enhanced,
+		BodyChars:  len([]rune(a.Body)),
+		Body:       body,
+		BodySample: bodySample,
+		Images:     a.Images,
+	}
+}
+
+func countEnhancedArticles(articles []article) int {
+	n := 0
+	for _, a := range articles {
+		if a.Enhanced {
+			n++
+		}
+	}
+	return n
 }
 
 func articleList(articles []article) string {

@@ -793,6 +793,7 @@ function buildArticlePromptClient(page, a) {
       language: style.language || "English",
       format:
         "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
+      tone: style.tone || "editorial",
     },
     style: {
       visual_brief: visualStyleBrief(kind),
