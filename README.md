@@ -31,6 +31,14 @@ magazine-builder
 
 Open http://localhost:8080.
 
+## Update
+
+```sh
+magazine-builder update
+```
+
+Downloads the latest release for your OS/architecture and replaces the installed `magazine-builder` binary. If you are not running an installed `magazine-builder` binary, it updates `${PREFIX:-$HOME/.local}/bin/magazine-builder`.
+
 Useful flags:
 
 ```sh

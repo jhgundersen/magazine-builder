@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"embed"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -21,12 +23,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+const (
+	repositoryName = "jhgundersen/magazine-builder"
+	binaryName     = "magazine-builder"
+)
+
+//go:embed static/*
+var embeddedStatic embed.FS
 
 type config struct {
 	Addr                      string
@@ -287,11 +298,30 @@ type podcastValue struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		if err := runUpdate(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	cfg := parseFlags()
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		log.Fatal(err)
 	}
 	s := &server{cfg: cfg, progress: map[string]progressStatus{}}
+	handler, err := s.routes()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("magazine-builder listening on http://localhost%s", cfg.Addr)
+	log.Fatal(http.ListenAndServe(cfg.Addr, handler))
+}
+
+func (s *server) routes() (http.Handler, error) {
+	staticFS, err := fs.Sub(embeddedStatic, "static")
+	if err != nil {
+		return nil, err
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/enhance-style", s.handleEnhanceStyle)
@@ -302,10 +332,9 @@ func main() {
 	mux.HandleFunc("/api/render-page", s.handleRenderPage)
 	mux.HandleFunc("/api/write-pdf", s.handleWritePDF)
 	mux.HandleFunc("/api/progress", s.handleProgress)
-	mux.Handle("/static/", http.StripPrefix("/static/", noCache(http.FileServer(http.Dir("static")))))
-	mux.Handle("/work/", http.StripPrefix("/work/", http.FileServer(http.Dir(cfg.WorkDir))))
-	log.Printf("magazine-builder listening on http://localhost%s", cfg.Addr)
-	log.Fatal(http.ListenAndServe(cfg.Addr, mux))
+	mux.Handle("/static/", http.StripPrefix("/static/", noCache(http.FileServer(http.FS(staticFS)))))
+	mux.Handle("/work/", http.StripPrefix("/work/", http.FileServer(http.Dir(s.cfg.WorkDir))))
+	return mux, nil
 }
 
 func parseFlags() config {
@@ -330,14 +359,201 @@ func parseFlags() config {
 	return cfg
 }
 
+type updateOptions struct {
+	Repo       string
+	Prefix     string
+	InstallDir string
+}
+
+type latestRelease struct {
+	TagName string `json:"tag_name"`
+}
+
+func runUpdate(args []string) error {
+	opts := updateOptions{
+		Repo:   repositoryName,
+		Prefix: defaultPrefix(),
+	}
+	flags := flag.NewFlagSet("update", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	flags.StringVar(&opts.Repo, "repo", opts.Repo, "GitHub repository to update from")
+	flags.StringVar(&opts.Prefix, "prefix", opts.Prefix, "installation prefix used when the current executable is not magazine-builder")
+	flags.StringVar(&opts.InstallDir, "install-dir", "", "directory containing the magazine-builder binary")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	asset, err := releaseAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	target, err := updateTarget(opts)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	tag, err := latestReleaseTag(ctx, opts.Repo)
+	if err != nil {
+		return err
+	}
+	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", opts.Repo, tag, asset)
+	fmt.Printf("Updating %s to %s...\n", target, tag)
+	if err := downloadAndReplace(ctx, url, target); err != nil {
+		return err
+	}
+	fmt.Printf("Updated: %s\n", target)
+	return nil
+}
+
+func releaseAssetName(goos, goarch string) (string, error) {
+	switch goos {
+	case "linux", "darwin":
+	default:
+		return "", fmt.Errorf("unsupported OS: %s", goos)
+	}
+	switch goarch {
+	case "amd64", "arm64":
+	default:
+		return "", fmt.Errorf("unsupported architecture: %s", goarch)
+	}
+	return fmt.Sprintf("%s-%s-%s", binaryName, goos, goarch), nil
+}
+
+func updateTarget(opts updateOptions) (string, error) {
+	if opts.InstallDir != "" {
+		return resolvedPath(filepath.Join(opts.InstallDir, binaryName)), nil
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe = resolvedPath(exe)
+		if filepath.Base(exe) == binaryName {
+			return exe, nil
+		}
+	}
+	if opts.Prefix == "" {
+		opts.Prefix = defaultPrefix()
+	}
+	return resolvedPath(filepath.Join(opts.Prefix, "bin", binaryName)), nil
+}
+
+func resolvedPath(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
+}
+
+func defaultPrefix() string {
+	if prefix := os.Getenv("PREFIX"); prefix != "" {
+		return prefix
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	return filepath.Join(home, ".local")
+}
+
+func latestReleaseTag(ctx context.Context, repo string) (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", binaryName)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("latest release lookup failed: %s", resp.Status)
+	}
+	var release latestRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", err
+	}
+	if release.TagName == "" {
+		return "", errors.New("latest release response did not include a tag")
+	}
+	return release.TagName, nil
+}
+
+func downloadAndReplace(ctx context.Context, url, target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), "."+binaryName+"-update-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	req.Header.Set("User-Agent", binaryName)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = tmp.Close()
+		return fmt.Errorf("binary download failed: %s", resp.Status)
+	}
+	n, err := io.Copy(tmp, resp.Body)
+	if err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if n == 0 {
+		_ = tmp.Close()
+		return errors.New("downloaded binary was empty")
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
+	index, err := embeddedStatic.ReadFile("static/index.html")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	http.ServeFile(w, r, filepath.Join("static", "index.html"))
+	_, _ = w.Write(index)
 }
 
 func noCache(next http.Handler) http.Handler {

@@ -6,11 +6,79 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestEmbeddedStaticAssetsServeOutsideRepo(t *testing.T) {
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWD); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	s := &server{cfg: config{WorkDir: t.TempDir()}, progress: map[string]progressStatus{}}
+	handler, err := s.routes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{path: "/", want: "/static/app.css"},
+		{path: "/static/app.css", want: ":root"},
+		{path: "/static/app.js", want: "let articles"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s returned %d", tc.path, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("%s response missing %q", tc.path, tc.want)
+		}
+	}
+}
+
+func TestReleaseAssetName(t *testing.T) {
+	tests := []struct {
+		goos   string
+		goarch string
+		want   string
+	}{
+		{goos: "linux", goarch: "amd64", want: "magazine-builder-linux-amd64"},
+		{goos: "darwin", goarch: "arm64", want: "magazine-builder-darwin-arm64"},
+	}
+	for _, tc := range tests {
+		got, err := releaseAssetName(tc.goos, tc.goarch)
+		if err != nil {
+			t.Fatalf("releaseAssetName(%q, %q): %v", tc.goos, tc.goarch, err)
+		}
+		if got != tc.want {
+			t.Fatalf("releaseAssetName(%q, %q) = %q, want %q", tc.goos, tc.goarch, got, tc.want)
+		}
+	}
+	if _, err := releaseAssetName("windows", "amd64"); err == nil {
+		t.Fatal("expected unsupported OS error")
+	}
+	if _, err := releaseAssetName("linux", "386"); err == nil {
+		t.Fatal("expected unsupported architecture error")
+	}
+}
 
 func TestExtractLikelyArticleRemovesEmbedsLinksAndFindsImages(t *testing.T) {
 	html := `<html><body>
