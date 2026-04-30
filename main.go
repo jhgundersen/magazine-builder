@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -121,6 +122,7 @@ type buildRequest struct {
 	MagazineType string    `json:"magazineType"`
 	Title        string    `json:"title"`
 	Style        string    `json:"style"`
+	StylePrompt  string    `json:"stylePrompt"`
 	PageCount    int       `json:"pageCount"`
 	Articles     []article `json:"articles"`
 	Workspace    string    `json:"workspace"`
@@ -181,13 +183,17 @@ type issueContext struct {
 
 func newIssueContext(now time.Time) issueContext {
 	now = now.Local()
-	year := now.Year()
-	number := now.YearDay()
-	date := now.Format("2006-01-02")
+	year := now.Year() - cryptoRandInt(8)
+	if cryptoRandInt(5) == 0 {
+		year = now.Year() + 1
+	}
+	day := 1 + cryptoRandInt(365)
+	date := time.Date(year, 1, 1, 12, 0, 0, 0, now.Location()).AddDate(0, 0, day-1)
+	number := 1 + cryptoRandInt(240)
 	return issueContext{
 		Number: number,
 		Year:   year,
-		Date:   date,
+		Date:   date.Format("2006-01-02"),
 		Label:  fmt.Sprintf("Issue %d, %d", number, year),
 	}
 }
@@ -222,6 +228,28 @@ func normalizeIssueContext(issue issueContext, now time.Time) issueContext {
 func issueContextLine(issue issueContext) string {
 	issue = normalizeIssueContext(issue, time.Now())
 	return fmt.Sprintf("%s; number %d; year %d; date %s", issue.Label, issue.Number, issue.Year, issue.Date)
+}
+
+func cryptoRandInt(max int) int {
+	if max <= 0 {
+		return 0
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return int(time.Now().UnixNano() % int64(max))
+	}
+	return int(n.Int64())
+}
+
+func randomHex(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return fmt.Sprintf("%x", b)
 }
 
 type magazineStyle struct {
@@ -800,7 +828,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	total := 2
+	total := 3
 	for _, a := range req.Articles {
 		if !a.Enhanced {
 			total++
@@ -817,8 +845,15 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	s.workspaceLog(workspace, "build: start title=%q articles=%d pages=%d", req.Title, len(req.Articles), req.PageCount)
 	s.workspaceLogJSON(workspace, "build: style JSON", style)
 	s.workspaceLogJSON(workspace, "build: input articles", articleLogEntries(req.Articles, false))
-	issue := newIssueContext(time.Now())
+	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Choosing issue number and date", Running: true})
+	issue, err := s.generateIssueContext(ctx, req, style)
+	if err != nil {
+		log.Printf("defapi text issue context failed: %v", err)
+		s.workspaceLog(workspace, "build: issue context failed: %v", err)
+		issue = newIssueContext(time.Now())
+	}
 	s.workspaceLogJSON(workspace, "build: issue JSON", issue)
+	done++
 	for i := range req.Articles {
 		if req.Articles[i].Enhanced {
 			continue
@@ -1089,6 +1124,34 @@ func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath s
 		return magazineStyle{}, err
 	}
 	return parsed, nil
+}
+
+func (s *server) generateIssueContext(ctx context.Context, req buildRequest, style magazineStyle) (issueContext, error) {
+	now := time.Now()
+	seed := randomHex(8)
+	originalStylePrompt := emptyDefault(req.StylePrompt, req.Style)
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys number, year, date, label. Choose a specific issue number and publication date for this magazine issue. Use the original user style prompt and publication concept to pick details that feel intentional: retro concepts may use older years, current affairs may be recent, timeless fictional magazines may use any plausible year. Add variety; do not default to today's date or issue number unless the style clearly asks for a current issue. The date must be Gregorian YYYY-MM-DD. The number must be a positive integer. The label must be short and localized if obvious, such as \"Issue 42, 1998\" or a natural equivalent. Use random seed %s.\n\nTODAY: %s\nPUBLICATION: %s\nPUBLICATION TYPE: %s\nLANGUAGE: %s\nSTYLE JSON SUMMARY: %s\nORIGINAL USER STYLE PROMPT:\n%s", seed, now.Format("2006-01-02"), emptyDefault(req.Title, emptyDefault(style.Name, "Untitled Magazine")), emptyDefault(req.MagazineType, "magazine"), emptyDefault(style.Language, "English"), styleLine(style, "content"), compact(originalStylePrompt, 1800))
+	text, err := s.runDefapiText(ctx, prompt, 400)
+	if err != nil {
+		return issueContext{}, err
+	}
+	var issue issueContext
+	if err := json.Unmarshal([]byte(extractJSONObject(text)), &issue); err != nil {
+		return issueContext{}, err
+	}
+	issue = normalizeIssueContext(issue, now)
+	parsedDate, err := time.Parse("2006-01-02", issue.Date)
+	if err != nil {
+		return issueContext{}, fmt.Errorf("invalid issue date %q: %w", issue.Date, err)
+	}
+	issue.Year = parsedDate.Year()
+	if !strings.Contains(issue.Label, strconv.Itoa(issue.Number)) || !strings.Contains(issue.Label, strconv.Itoa(issue.Year)) {
+		issue.Label = fmt.Sprintf("Issue %d, %d", issue.Number, issue.Year)
+	}
+	if issue.Number <= 0 || issue.Year <= 0 || strings.TrimSpace(issue.Label) == "" {
+		return issueContext{}, errors.New("incomplete issue context")
+	}
+	return issue, nil
 }
 
 func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, style magazineStyle, issue issueContext) (creativeKit, error) {

@@ -13,6 +13,7 @@ let busyCount = 0;
 let isRendering = false;
 let renderCallTotal = 0;
 let renderCallDone = 0;
+let originalStylePrompt = "";
 const $ = (id) => document.getElementById(id);
 function esc(s) {
   return String(s).replace(
@@ -128,6 +129,7 @@ async function ensureStyle() {
   return await enhanceStyle();
 }
 async function enhanceStyle() {
+  originalStylePrompt = $("style").value;
   const fd = new FormData();
   fd.append("apiKey", apiKey);
   fd.append("title", $("title").value);
@@ -259,6 +261,51 @@ $("addFeature").onclick = () => {
   });
   renderArticles();
 };
+$("exportArticles").onclick = () => {
+  if (isRendering) return;
+  const payload = {
+    articles: normalizeArticlesForImport(articles),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "magazine-articles.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$("importArticles").onclick = () => {
+  if (isRendering) return;
+  $("articleFile").click();
+};
+$("articleFile").onchange = (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file || isRendering) return;
+  const reader = new FileReader();
+  $("generateStatus").textContent = "Reading article JSON...";
+  reader.onload = () => {
+    try {
+      const imported = normalizeArticleImport(
+        JSON.parse(String(reader.result || "")),
+      );
+      articles = imported;
+      renderArticles();
+      $("generateStatus").textContent =
+        "Imported " + articles.length + " article(s).";
+    } catch (err) {
+      $("generateStatus").textContent =
+        err.message || "Could not load article JSON.";
+    } finally {
+      e.target.value = "";
+    }
+  };
+  reader.onerror = () => {
+    $("generateStatus").textContent = "Could not read file.";
+    e.target.value = "";
+  };
+  reader.readAsText(file);
+};
 $("clear").onclick = () => {
   if (isRendering) return;
   $("style").value = "";
@@ -369,6 +416,7 @@ async function buildPlan() {
     title: $("title").value,
     magazineType: "",
     style: $("style").value,
+    stylePrompt: originalStylePrompt || $("style").value,
     pageCount: +$("pageCount").value,
     articles,
     workspace,
@@ -512,6 +560,48 @@ function normalizeImportedPlan(raw) {
   data.issue = normalizeIssue(data.issue);
   return data;
 }
+function normalizeArticleImport(raw) {
+  const list = Array.isArray(raw)
+    ? raw
+    : raw && Array.isArray(raw.articles)
+      ? raw.articles
+      : null;
+  if (!list) {
+    throw new Error("The JSON file is missing an articles array.");
+  }
+  return normalizeArticlesForImport(list);
+}
+function normalizeArticlesForImport(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((a) =>
+      Object.assign(
+        {
+          kind: "article",
+          title: "",
+          body: "",
+          images: [],
+          pages: 1,
+          enhanced: false,
+        },
+        a || {},
+      ),
+    )
+    .map((a) => {
+      a.kind = a.kind === "feature" ? "feature" : "article";
+      a.title = String(a.title || "");
+      a.body = String(a.body || "");
+      a.images = Array.isArray(a.images)
+        ? a.images
+            .map(String)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+      a.pages = Math.max(1, Math.min(8, parseInt(a.pages || "1", 10)));
+      a.enhanced = Boolean(a.enhanced);
+      if (a.source) a.source = String(a.source);
+      return a;
+    });
+}
 $("render").onclick = (e) =>
   withBusy(e.currentTarget, "Preparing...", () => startRenderFlow());
 $("renderSide").onclick = (e) =>
@@ -540,7 +630,7 @@ function setProgress(id, pct, label) {
   if (text && label) text.textContent = label;
 }
 function estimatePlanDefapiTextCalls() {
-  return 2 + articles.filter((a) => !a.enhanced).length;
+  return 3 + articles.filter((a) => !a.enhanced).length;
 }
 function startProgressPolling(workspaceId, kind, progressId) {
   let stopped = false;
@@ -739,6 +829,7 @@ function buildPagePool(pages) {
   const pool = [];
   (pages || []).forEach((page, i) => {
     if (i === 0 || i === (pages || []).length - 1) return;
+    if (page.article) return;
     const p = clonePageForSlot(page, page.number || i + 1);
     const key = pagePoolKey(p);
     if (seen.has(key)) return;
