@@ -374,11 +374,12 @@ async function buildPlan() {
     workspace,
     apiKey,
     textModel,
+    imageModel,
   };
   const out = $("output");
-  const defapiTextCalls = estimatePlanDefapiTextCalls();
+  const planCalls = estimatePlanDefapiTextCalls();
   out.innerHTML = progressHTML(
-    "Waiting for " + defapiTextCalls + " defapi text call(s)...",
+    "Waiting for " + planCalls + " planning call(s)...",
     8,
     "planProgress",
   );
@@ -506,6 +507,7 @@ function normalizeImportedPlan(raw) {
   );
   data.style = data.style || {};
   data.creativeKit = data.creativeKit || {};
+  data.brandAssets = Array.isArray(data.brandAssets) ? data.brandAssets : [];
   data.articles = Array.isArray(data.articles) ? data.articles : [];
   data.issue = normalizeIssue(data.issue);
   return data;
@@ -538,7 +540,7 @@ function setProgress(id, pct, label) {
   if (text && label) text.textContent = label;
 }
 function estimatePlanDefapiTextCalls() {
-  return 1 + articles.filter((a) => !a.enhanced).length;
+  return 2 + articles.filter((a) => !a.enhanced).length;
 }
 function startProgressPolling(workspaceId, kind, progressId) {
   let stopped = false;
@@ -602,7 +604,9 @@ function renderPlan(data) {
     esc(JSON.stringify(data.style || {}, null, 2)) +
     '</textarea><div class="status" id="styleJsonStatus">Edit style JSON to update later prompts.</div><label>Creative kit JSON</label><textarea class="prompt style-json" data-kit-json>' +
     esc(kit) +
-    '</textarea><div class="status" id="kitJsonStatus">Edit creative kit JSON to update later page prompts.</div></div>' +
+    '</textarea><div class="status" id="kitJsonStatus">Edit creative kit JSON to update later page prompts.</div>' +
+    brandAssetsHTML(data.brandAssets || []) +
+    "</div>" +
     unplannedNoticeHTML() +
     '<div id="pageGrid" class="grid">' +
     pageGridHTML(data.pages || []) +
@@ -612,6 +616,29 @@ function renderPlan(data) {
   wireKitEditor();
   wireSwapEditors();
   wireDrag();
+}
+function brandAssetsHTML(assets) {
+  assets = Array.isArray(assets) ? assets : [];
+  if (!assets.length) {
+    return '<div class="brand-assets empty"><label>Brand assets</label><div class="status">No generated brand sheet for this plan.</div></div>';
+  }
+  return (
+    '<div class="brand-assets"><label>Brand assets</label><div class="brand-asset-row">' +
+    assets
+      .map(
+        (asset) =>
+          '<figure class="brand-asset"><img src="' +
+          esc(asset.image || asset.publicUrl || "") +
+          '" alt=""><figcaption>' +
+          esc(asset.label || asset.kind || "Brand reference") +
+          (asset.publicUrl
+            ? "<span>Used as one render reference image.</span>"
+            : "<span>Preview only: no public URL returned.</span>") +
+          "</figcaption></figure>",
+      )
+      .join("") +
+    "</div></div>"
+  );
 }
 function pageGridHTML(pages) {
   const cover = pages[0] ? pageHTML(pages[0], 0) : "";
@@ -806,7 +833,7 @@ function buildArticlePromptClient(page, a) {
     },
     layout: {
       required_elements:
-        "headline, deck, byline/source if available, columns, image slots, captions, pull quote/sidebar where useful",
+        "headline, deck, byline/source if available, columns, image slots, article-specific image text, pull quote/sidebar where useful",
     },
     constraints: ["full page visible", "no crop"],
   });
@@ -1086,6 +1113,7 @@ async function renderPage(page, styleReference) {
       page: renderPage,
       style: lastPlan.style || {},
       issue: issueContext(),
+      brandAssets: brandAssetsForRender(page),
       styleReference,
       reference: ref,
       workspace,
@@ -1134,6 +1162,8 @@ function finalRenderPrompt(page) {
       visual_brief: visualStyleBrief(page.kind || "content"),
       creative_kit: creativeKitForPage(page.kind || "content"),
     };
+    const brand = brandAssetPrompt(page);
+    if (brand) prompt.style.brand_assets = brand;
     if (prompt.layout) {
       delete prompt.layout.continuity;
     }
@@ -1150,6 +1180,15 @@ function finalRenderPrompt(page) {
     prompt.render_position = renderPosition;
     return fitPromptJSON(prompt);
   }
+}
+function brandAssetsForRender(page) {
+  if (!lastPlan || page.kind === "advert") return [];
+  return (lastPlan.brandAssets || []).filter((asset) => asset.publicUrl);
+}
+function brandAssetPrompt(page) {
+  if (!lastPlan || page.kind === "advert") return "";
+  if (!brandAssetsForRender(page).length) return "";
+  return "A supplied brand asset board contains usable masthead, wordmark, issue seal, divider and folio marks. Use only the actual marks from it for cover identity and recurring page furniture when appropriate. Do not reproduce the whole board, its background, spacing, or any non-brand explanatory text.";
 }
 function fitPromptJSON(prompt) {
   let out = JSON.stringify(prompt);
@@ -1192,15 +1231,18 @@ function cleanPromptFromPage(page) {
     style: {
       visual_brief: visualStyleBrief(page.kind || "content"),
       creative_kit: creativeKitForPage(page.kind || "content"),
+      brand_assets: brandAssetPrompt(page) || undefined,
     },
     content: {
       title: page.title || article.title || "Untitled",
       brief_body: compactClient(body, 1500),
       modules: pageModules(page),
+      image_text_notes:
+        "If images or illustrations are used, write short image text from this article. Do not use generic reusable image text. Write only the image text itself, without a label prefix.",
     },
     layout: {
       required_elements:
-        "headline, deck, byline/source if available, readable columns, image or comic illustration slots, captions, pull quote/sidebar where useful",
+        "headline, deck, byline/source if available, readable columns, image or comic illustration slots, article-specific image text, pull quote/sidebar where useful",
     },
     constraints: [
       "full page visible",
@@ -1260,7 +1302,7 @@ function creativeKitForPage(kind) {
   if (kind === "back-page") return { backPage: take(kit.backPage) };
   if (kind === "filler")
     return { departments: take(kit.departments), sidebars: take(kit.sidebars) };
-  return { sidebars: take(kit.sidebars), captions: take(kit.captions) };
+  return { sidebars: take(kit.sidebars) };
 }
 function visualStyleBrief(kind) {
   const style = (lastPlan && lastPlan.style) || {};
@@ -1284,7 +1326,7 @@ function visualStyleBrief(kind) {
     "Typography: " + (style.typography || ""),
     "Palette: " + (style.color || ""),
     "Print treatment: " + (style.print || ""),
-    "Page furniture: repeat this exact system from the style JSON: same margins, column grid, running-header placement, footer rule, folio placement and caption treatment.",
+    "Page furniture: repeat this exact system from the style JSON: same margins, column grid, running-header placement, footer rule, folio placement and image-text treatment.",
     style.avoid ? "Avoid: " + style.avoid : "",
   ]
     .filter(Boolean)

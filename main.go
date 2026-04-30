@@ -126,11 +126,13 @@ type buildRequest struct {
 	Workspace    string    `json:"workspace"`
 	APIKey       string    `json:"apiKey"`
 	TextModel    string    `json:"textModel"`
+	ImageModel   string    `json:"imageModel"`
 }
 
 type buildResponse struct {
 	Style       magazineStyle `json:"style"`
 	CreativeKit creativeKit   `json:"creativeKit"`
+	BrandAssets []brandAsset  `json:"brandAssets,omitempty"`
 	Articles    []article     `json:"articles"`
 	Pages       []pagePlan    `json:"pages"`
 	Issue       issueContext  `json:"issue"`
@@ -244,14 +246,22 @@ type creativeKit struct {
 	Departments []string `json:"departments"`
 	Adverts     []string `json:"adverts"`
 	Sidebars    []string `json:"sidebars"`
-	Captions    []string `json:"captions"`
 	BackPage    []string `json:"backPage"`
+}
+
+type brandAsset struct {
+	Kind      string `json:"kind"`
+	Label     string `json:"label"`
+	Image     string `json:"image"`
+	PublicURL string `json:"publicUrl,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
 }
 
 type renderPageRequest struct {
 	Page           pagePlan      `json:"page"`
 	Style          magazineStyle `json:"style"`
 	Issue          issueContext  `json:"issue"`
+	BrandAssets    []brandAsset  `json:"brandAssets"`
 	StyleReference string        `json:"styleReference"`
 	Reference      string        `json:"reference"`
 	Workspace      string        `json:"workspace"`
@@ -781,7 +791,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, "")
+	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, req.ImageModel)
 	req.PageCount = normalizePageCount(req.PageCount)
 	req.Articles = cleanArticles(req.Articles)
 	style := parseStyle(req.Style)
@@ -790,7 +800,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	total := 1
+	total := 2
 	for _, a := range req.Articles {
 		if !a.Enhanced {
 			total++
@@ -844,10 +854,18 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	s.workspaceLogJSON(workspace, "build: final articles", articleLogEntries(req.Articles, true))
 	s.workspaceLogJSON(workspace, "build: creative kit JSON", kit)
 	done++
+	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Generating brand assets", Running: true})
+	brandAssets, err := s.generateBrandAssets(ctx, workspace, req, style, issue)
+	if err != nil {
+		log.Printf("defapi image brand assets failed: %v", err)
+		s.workspaceLog(workspace, "build: brand assets failed: %v", err)
+	}
+	s.workspaceLogJSON(workspace, "build: brand assets JSON", brandAssets)
+	done++
 	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Plan ready", Running: false})
 	completed = true
 	s.workspaceLog(workspace, "build: complete")
-	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, Articles: req.Articles, Pages: planMagazine(req, style, kit, issue), Issue: issue, Workspace: workspace})
+	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, BrandAssets: brandAssets, Articles: req.Articles, Pages: planMagazine(req, style, kit, issue), Issue: issue, Workspace: workspace})
 }
 
 func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {
@@ -899,6 +917,7 @@ func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, req.ImageModel)
 	images := filterStrings([]string{req.StyleReference, req.Reference})
+	images = append(images, brandAssetRefsForPage(req.Page, req.BrandAssets)...)
 	images = append(images, req.Page.Images...)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Page.Title)
 	if err != nil {
@@ -1057,7 +1076,7 @@ func newWorkspaceID(title string) string {
 }
 
 func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath string) (magazineStyle, error) {
-	prompt := "Return only valid compact JSON for a reusable magazine/newspaper/comic style. No markdown. Keep each field under 260 characters so later image prompts stay under 4000 chars. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, typography, color, print, avoid. The name field must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". The language field must be the publication language inferred from the user style/title, such as English, Norwegian Bokmal, French, etc. The tone field must describe the text voice for article rewrites and generated page furniture. If the user asks for a comic, satire, parody, hysterical/adult humor, tabloid, puzzle, or other strong format, do not flatten it into a normal respectable magazine. Put explicit structural instructions into content, feature, short, filler and back: panels, cartoons, captions, recurring gags, fake departments, absurd infographics, pull-quotes, punchlines, and visual comedy. Adult comic means aimed at grown-ups, not explicit or vulgar unless the user asks. Define guidance for cover, normal content pages, feature articles, short articles, adverts, filler/departments and back page. Include consistent header, footer, folio and grid guidance in content/core rather than a separate template page.\n\nUser style:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
+	prompt := "Return only valid compact JSON for a reusable magazine/newspaper/comic style. No markdown. Keep each field under 260 characters so later image prompts stay under 4000 chars. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, typography, color, print, avoid. The name field must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". The language field must be the publication language inferred from the user style/title, such as English, Norwegian Bokmal, French, etc. The tone field must describe the text voice for article rewrites and generated page furniture. If the user asks for a comic, satire, parody, hysterical/adult humor, tabloid, puzzle, or other strong format, do not flatten it into a normal respectable magazine. Put explicit structural instructions into content, feature, short, filler and back: panels, cartoons, image text, recurring gags, fake departments, absurd infographics, pull-quotes, punchlines, and visual comedy. Adult comic means aimed at grown-ups, not explicit or vulgar unless the user asks. Define guidance for cover, normal content pages, feature articles, short articles, adverts, filler/departments and back page. Include consistent header, footer, folio and grid guidance in content/core rather than a separate template page.\n\nUser style:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
 	if referencePath != "" {
 		prompt += "\n\nReference image URL: " + referencePath + "\nUse this URL as visual inspiration for palette, typography mood, texture and layout feeling, but describe the reusable style in words."
 	}
@@ -1073,7 +1092,7 @@ func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath s
 }
 
 func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, style magazineStyle, issue issueContext) (creativeKit, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, captions, backPage. Make departments, sidebars and captions arrays of 18-24 unique short strings each. Make adverts and backPage arrays of 10-16 unique short strings each. Every string must describe one specific reusable page element, never a duplicate or near-duplicate. Prepare issue-wide generic page elements for a %s called %q. Match this style and tone: %s. Issue context: %s. Use that exact issue number/date/year when an element needs issue metadata; otherwise omit issue metadata. Do not invent a different issue number, year or date. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), issueContextLine(issue), articleList(req.Articles))
+	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, backPage. Make departments and sidebars arrays of 18-24 unique short strings each. Make adverts and backPage arrays of 10-16 unique short strings each. Every string must describe one specific reusable page element, never a duplicate or near-duplicate. Do not include reusable image text or image-text labels in this issue-wide kit; image text must be derived from each article at page-render time. Prepare issue-wide generic page elements for a %s called %q. Match this style and tone: %s. Issue context: %s. Use that exact issue number/date/year when an element needs issue metadata; otherwise omit issue metadata. Do not invent a different issue number, year or date. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), issueContextLine(issue), articleList(req.Articles))
 	text, err := s.runDefapiText(ctx, prompt, 1800)
 	if err != nil {
 		return creativeKit{}, err
@@ -1083,6 +1102,44 @@ func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, styl
 		return creativeKit{}, err
 	}
 	return kit, nil
+}
+
+func (s *server) generateBrandAssets(ctx context.Context, workspace string, req buildRequest, style magazineStyle, issue issueContext) ([]brandAsset, error) {
+	title := emptyDefault(req.Title, emptyDefault(style.Name, "Untitled Magazine"))
+	prompt := imagePromptJSON(map[string]any{
+		"task": "Create one clean unlabeled magazine brand asset board.",
+		"metadata": map[string]any{
+			"publication": title,
+			"language":    emptyDefault(style.Language, "English"),
+			"tone":        emptyDefault(style.Tone, "editorial"),
+			"issue":       issue,
+		},
+		"style": map[string]any{
+			"visual_brief": imageStyleBrief(style, "cover"),
+		},
+		"content": map[string]any{
+			"assets_to_draw": []string{
+				"large cover masthead using only the publication name",
+				"small horizontal running-header wordmark using only the publication name",
+				"simple issue seal or bug using only the supplied issue number/date/year",
+				"one divider/rule motif and one small folio mark with no explanatory text",
+			},
+			"layout": "single flat asset board on a plain light background, generous whitespace between assets, no mockup pages, no article photos",
+			"text":   "Only draw text that is part of the actual brand asset: publication name, issue number, issue date, issue year. Do not add labels, headings, captions, annotations, arrows, callouts, descriptions, filenames, element names or explanatory text.",
+		},
+		"constraints": []string{"unlabeled asset board", "simple vector-like marks", "high contrast", "print magazine identity system", "no labels such as logo, masthead, wordmark, seal, divider or folio", "avoid " + style.Avoid},
+	})
+	image, err := s.runDefapiImageWithRetry(ctx, workspace, 0, prompt, nil)
+	if err != nil {
+		return nil, err
+	}
+	return []brandAsset{{
+		Kind:      "brand-sheet",
+		Label:     "Logo, header wordmark, issue seal and folio marks",
+		Image:     image.Image,
+		PublicURL: image.PublicURL,
+		Prompt:    prompt,
+	}}, nil
 }
 
 func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
@@ -1460,9 +1517,25 @@ func defapiImageRef(imageRef string) string {
 	return ""
 }
 
+func brandAssetRefsForPage(page pagePlan, assets []brandAsset) []string {
+	if page.Kind == "advert" {
+		return nil
+	}
+	refs := []string{}
+	for _, asset := range assets {
+		if asset.PublicURL != "" {
+			refs = append(refs, asset.PublicURL)
+		}
+		if len(refs) >= 1 {
+			break
+		}
+	}
+	return refs
+}
+
 func (s *server) defapiImageRefs(ctx context.Context, workspace string, images []string) []string {
 	refs := []string{}
-	for _, imageRef := range limitStrings(uniqueStrings(images), 16) {
+	for _, imageRef := range limitStrings(uniqueStrings(images), 10) {
 		ref := defapiImageRef(imageRef)
 		if ref == "" {
 			if strings.TrimSpace(imageRef) != "" {
@@ -1859,7 +1932,7 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit, issue 
 			}
 			continue
 		}
-		pages = append(pages, pagePlan{Number: n, Kind: "filler", Title: "Departments", Prompt: genericPrompt(n, title, style, modules.next("filler", 4, n), "filler", "Create a department/filler page with short recurring modules, briefs, reader notes, charts, sidebars, small adverts, captions, and visual rhythm suited to the publication.", issue)})
+		pages = append(pages, pagePlan{Number: n, Kind: "filler", Title: "Departments", Prompt: genericPrompt(n, title, style, modules.next("filler", 4, n), "filler", "Create a department/filler page with short recurring modules, briefs, reader notes, charts, sidebars, small adverts, image notes, and visual rhythm suited to the publication.", issue)})
 	}
 	return pages
 }
@@ -1907,13 +1980,14 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 			"visual_brief": imageStyleBrief(style, kind),
 		},
 		"content": map[string]any{
-			"title":       a.Title,
-			"brief_body":  compact(a.Body, 1900),
-			"series_note": series,
-			"modules":     modules,
+			"title":            a.Title,
+			"brief_body":       compact(a.Body, 1900),
+			"series_note":      series,
+			"modules":          modules,
+			"image_text_notes": articleImageTextNotes(a),
 		},
 		"layout": map[string]any{
-			"required_elements": "headline, deck, byline/source if available, readable columns, image slots, captions, pull quote/sidebar where useful",
+			"required_elements": "headline, deck, byline/source if available, readable columns, image slots, article-specific image text, pull quote/sidebar where useful",
 		},
 		"constraints": []string{"full page visible", "no crop", "keep page furniture consistent across issue", "avoid " + style.Avoid},
 	})
@@ -1927,6 +2001,14 @@ func normalizedArticlePages(a article) int {
 		return 8
 	}
 	return a.Pages
+}
+
+func articleImageTextNotes(a article) string {
+	notes := "If images or illustrations are used, write short article-specific image text from the supplied title/body/source. Do not use generic reusable image text. Write only the image text itself, without a label prefix."
+	if a.Source != "" {
+		notes += " Source context: " + compact(a.Source, 140) + "."
+	}
+	return notes
 }
 
 func genericPrompt(n int, title string, style magazineStyle, modules, kind, task string, issue issueContext) string {
@@ -1959,7 +2041,7 @@ func imageStyleBrief(style magazineStyle, kind string) string {
 		"Typography: " + style.Typography,
 		"Palette: " + style.Color,
 		"Print treatment: " + style.Print,
-		"Page furniture: same margins, column grid, running-header placement, footer rule, folio placement and caption treatment on every page.",
+		"Page furniture: same margins, column grid, running-header placement, footer rule, folio placement and image-text treatment on every page.",
 		"Avoid: " + style.Avoid,
 	}, " "), 1200)
 }
@@ -2108,7 +2190,7 @@ func fallbackStyle(style, referencePath string) magazineStyle {
 		Advert:     "fictional full-page advert using the same print world, distinct from editorial pages",
 		Filler:     "departments, briefs, charts, reader notes, small classifieds and recurring modules",
 		Back:       "closing advert, subscription panel, teaser or striking single visual",
-		Typography: "strong masthead, readable serif or humanist body, compact captions and section labels",
+		Typography: "strong masthead, readable serif or humanist body, compact image notes and section labels",
 		Color:      "limited coherent palette with one warm and one cool accent",
 		Print:      "tactile paper, realistic print texture, subtle scan/photo imperfections",
 		Avoid:      "generic web UI, floating app cards, unreadable logo, mismatched styles, real brands unless provided",
@@ -2120,8 +2202,7 @@ func fallbackCreativeKit(req buildRequest) creativeKit {
 		Departments: []string{"editor's note", "short briefs", "reader mail", "local listings", "numbers panel", "what's next", "staff picks", "calendar strip", "reader poll", "corrections box", "market notes", "archive corner", "field report", "mini interview", "glossary block", "resource list", "event diary", "trend meter"},
 		Adverts:     []string{"small classified ad", "fictional supplier advert", "subscription offer", "event notice", "service directory", "training course ad", "local shop panel", "conference notice", "mail-order coupon", "patron thank-you"},
 		Sidebars:    []string{"key facts", "timeline", "quote box", "how it works", "recommended next read", "source notes", "before and after", "checklist", "map inset", "numbers to know", "pros and cons", "mini profile", "method box", "field notes", "reader tip", "myth versus fact", "toolbox", "quick glossary"},
-		Captions:    []string{"dry editorial caption", "technical caption", "behind-the-scenes note", "short contextual label", "archive caption", "process caption", "comparison note", "source credit line", "location note", "object label", "timeline caption", "quote attribution", "data note", "materials caption", "scene setter", "detail callout", "before-note", "after-note"},
-		BackPage:    []string{"subscription panel", "single bold advert", "teaser for next issue", "index and closing note", "reader challenge", "classified strip", "next-month calendar", "sponsor panel", "credits block", "closing image caption"},
+		BackPage:    []string{"subscription panel", "single bold advert", "teaser for next issue", "index and closing note", "reader challenge", "classified strip", "next-month calendar", "sponsor panel", "credits block", "closing image note"},
 	}
 }
 
@@ -2206,9 +2287,6 @@ func decodeCreativeKit(text string) (creativeKit, error) {
 	if len(kit.Sidebars) == 0 {
 		kit.Sidebars = fallback.Sidebars
 	}
-	if len(kit.Captions) == 0 {
-		kit.Captions = fallback.Captions
-	}
 	if len(kit.BackPage) == 0 {
 		kit.BackPage = fallback.BackPage
 	}
@@ -2261,8 +2339,8 @@ func newModulePlanner(kit creativeKit) *modulePlanner {
 			"advert":  uniqueStrings(kit.Adverts),
 			"back":    uniqueStrings(append(append([]string{}, kit.BackPage...), kit.Adverts...)),
 			"filler":  uniqueStrings(append(append([]string{}, kit.Departments...), kit.Sidebars...)),
-			"article": uniqueStrings(append(append([]string{}, kit.Sidebars...), kit.Captions...)),
-			"feature": uniqueStrings(append(append([]string{}, kit.Sidebars...), append(kit.Captions, kit.Departments...)...)),
+			"article": uniqueStrings(kit.Sidebars),
+			"feature": uniqueStrings(append(append([]string{}, kit.Sidebars...), kit.Departments...)),
 		},
 		used:    map[string]bool{},
 		cursors: map[string]int{},

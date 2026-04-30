@@ -383,6 +383,39 @@ textarea {
   padding: 14px;
   margin-bottom: 12px;
 }
+.brand-assets {
+  margin-top: 12px;
+}
+.brand-asset-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+.brand-asset {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8fafb;
+}
+.brand-asset img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16/10;
+  object-fit: contain;
+  background: white;
+}
+.brand-asset figcaption {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  font-size: 12px;
+  color: #26343c;
+}
+.brand-asset figcaption span {
+  color: var(--muted);
+}
 .preview {
   width: 100%;
   aspect-ratio: 1240/1754;
