@@ -2,3 +2,4 @@ magazine-work/
 bin/
 *.pdf
 .codex
+tmp/

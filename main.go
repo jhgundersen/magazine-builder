@@ -1346,13 +1346,11 @@ func (s *server) runDefapiImage(ctx context.Context, workspace string, pageNumbe
 		"-background", s.cfg.DefapiImageBackground,
 		"-output", out,
 	}
-	for _, img := range limitStrings(uniqueStrings(images), 16) {
-		ref := defapiImageRef(img)
-		if ref != "" {
-			args = append(args, "-image", ref)
-		}
+	refs := s.defapiImageRefs(cctx, workspace, images)
+	for _, ref := range refs {
+		args = append(args, "-image", ref)
 	}
-	s.workspaceLog(workspace, "defapi image: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(prompt)), len(images), (len(args)-8)/2)
+	s.workspaceLog(workspace, "defapi image: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(prompt)), len(images), len(refs))
 	args = append(commandArgs(s.cfg.DefapiImageCategory, imageModelFromContext(ctx, s.cfg.DefapiImageModel)), append(args, limitPrompt(prompt, s.cfg.DefapiImageMaxPromptChars))...)
 	cmd := exec.CommandContext(cctx, s.cfg.DefapiImageCmd, args...)
 	cmd.Env = commandEnv(ctx)
@@ -1400,6 +1398,75 @@ func defapiImageRef(imageRef string) string {
 		return strings.ReplaceAll(imageRef, ",", "%2C")
 	}
 	return ""
+}
+
+func (s *server) defapiImageRefs(ctx context.Context, workspace string, images []string) []string {
+	refs := []string{}
+	for _, imageRef := range limitStrings(uniqueStrings(images), 16) {
+		ref := defapiImageRef(imageRef)
+		if ref == "" {
+			if strings.TrimSpace(imageRef) != "" {
+				s.workspaceLog(workspace, "defapi image-ref: skipped non-public ref=%q", imageRef)
+			}
+			continue
+		}
+		contentType, err := defapiImageContentType(ctx, ref)
+		if err != nil {
+			s.workspaceLog(workspace, "defapi image-ref: skipped ref=%q error=%v", ref, err)
+			continue
+		}
+		if !allowedDefapiImageContentType(contentType) {
+			s.workspaceLog(workspace, "defapi image-ref: skipped ref=%q content_type=%q", ref, contentType)
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func defapiImageContentType(ctx context.Context, imageRef string) (string, error) {
+	contentType, status, err := requestImageContentType(ctx, http.MethodHead, imageRef)
+	if err == nil {
+		return contentType, nil
+	}
+	if status != http.StatusMethodNotAllowed && status != http.StatusForbidden {
+		return "", err
+	}
+	contentType, _, getErr := requestImageContentType(ctx, http.MethodGet, imageRef)
+	if getErr != nil {
+		return "", getErr
+	}
+	return contentType, nil
+}
+
+func requestImageContentType(ctx context.Context, method, imageRef string) (string, int, error) {
+	req, err := http.NewRequestWithContext(ctx, method, imageRef, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("User-Agent", "magazine-builder/0.1")
+	if method == http.MethodGet {
+		req.Header.Set("Range", "bytes=0-0")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", resp.StatusCode, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
+	}
+	return resp.Header.Get("Content-Type"), resp.StatusCode, nil
+}
+
+func allowedDefapiImageContentType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch contentType {
+	case "image/jpeg", "image/jpg", "image/png", "image/webp":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseImageURL(output string) string {

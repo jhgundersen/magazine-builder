@@ -122,6 +122,39 @@ func TestDefapiImageRefOnlyAllowsPublicURLs(t *testing.T) {
 	}
 }
 
+func TestDefapiImageRefsOnlyAllowsSupportedRasterContentTypes(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/photo.jpg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg; charset=binary")
+	})
+	mux.HandleFunc("/icon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+	})
+	mux.HandleFunc("/missing.webp", func(w http.ResponseWriter, r *http.Request) {})
+	mux.HandleFunc("/head-blocked.webp", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "image/webp")
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	s := &server{cfg: config{WorkDir: t.TempDir()}}
+	got := s.defapiImageRefs(context.Background(), "refs", []string{
+		ts.URL + "/photo.jpg",
+		ts.URL + "/icon.svg",
+		ts.URL + "/missing.webp",
+		ts.URL + "/head-blocked.webp",
+		"/work/refs/renders/page-01.jpg",
+	})
+	want := []string{ts.URL + "/photo.jpg", ts.URL + "/head-blocked.webp"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("defapiImageRefs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestParseImageURL(t *testing.T) {
 	output := "Task submitted: x\nPolling... done.\nImage URL: https://aisaas.nots.top/tmp/page.png\nSaved to: /tmp/page.jpg\n"
 	if got := parseImageURL(output); got != "https://aisaas.nots.top/tmp/page.png" {
