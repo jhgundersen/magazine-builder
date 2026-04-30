@@ -133,6 +133,7 @@ type buildResponse struct {
 	CreativeKit creativeKit   `json:"creativeKit"`
 	Articles    []article     `json:"articles"`
 	Pages       []pagePlan    `json:"pages"`
+	Issue       issueContext  `json:"issue"`
 	Reference   string        `json:"reference,omitempty"`
 	Workspace   string        `json:"workspace"`
 }
@@ -141,6 +142,7 @@ type coverPlanRequest struct {
 	Title     string        `json:"title"`
 	Style     magazineStyle `json:"style"`
 	Pages     []pagePlan    `json:"pages"`
+	Issue     issueContext  `json:"issue"`
 	Workspace string        `json:"workspace"`
 	APIKey    string        `json:"apiKey"`
 	TextModel string        `json:"textModel"`
@@ -166,6 +168,58 @@ type pagePlan struct {
 	Prompt  string   `json:"prompt"`
 	Images  []string `json:"images,omitempty"`
 	Article *article `json:"article,omitempty"`
+}
+
+type issueContext struct {
+	Number int    `json:"number"`
+	Year   int    `json:"year"`
+	Date   string `json:"date"`
+	Label  string `json:"label"`
+}
+
+func newIssueContext(now time.Time) issueContext {
+	now = now.Local()
+	year := now.Year()
+	number := now.YearDay()
+	date := now.Format("2006-01-02")
+	return issueContext{
+		Number: number,
+		Year:   year,
+		Date:   date,
+		Label:  fmt.Sprintf("Issue %d, %d", number, year),
+	}
+}
+
+func normalizeIssueContext(issue issueContext, now time.Time) issueContext {
+	if issue.Number <= 0 && issue.Year <= 0 && strings.TrimSpace(issue.Date) == "" && strings.TrimSpace(issue.Label) == "" {
+		return newIssueContext(now)
+	}
+	if issue.Year <= 0 {
+		if parsed, err := time.Parse("2006-01-02", strings.TrimSpace(issue.Date)); err == nil {
+			issue.Year = parsed.Year()
+		} else {
+			issue.Year = now.Local().Year()
+		}
+	}
+	if issue.Number <= 0 {
+		if parsed, err := time.Parse("2006-01-02", strings.TrimSpace(issue.Date)); err == nil {
+			issue.Number = parsed.YearDay()
+		} else {
+			issue.Number = now.Local().YearDay()
+		}
+	}
+	if strings.TrimSpace(issue.Date) == "" {
+		issue.Date = now.Local().Format("2006-01-02")
+	}
+	if strings.TrimSpace(issue.Label) == "" {
+		issue.Label = fmt.Sprintf("Issue %d, %d", issue.Number, issue.Year)
+	}
+	return issue
+}
+
+func issueContextLine(issue issueContext) string {
+	issue = normalizeIssueContext(issue, time.Now())
+	return fmt.Sprintf("%s; number %d; year %d; date %s", issue.Label, issue.Number, issue.Year, issue.Date)
 }
 
 type magazineStyle struct {
@@ -197,6 +251,7 @@ type creativeKit struct {
 type renderPageRequest struct {
 	Page           pagePlan      `json:"page"`
 	Style          magazineStyle `json:"style"`
+	Issue          issueContext  `json:"issue"`
 	StyleReference string        `json:"styleReference"`
 	Reference      string        `json:"reference"`
 	Workspace      string        `json:"workspace"`
@@ -752,6 +807,8 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	s.workspaceLog(workspace, "build: start title=%q articles=%d pages=%d", req.Title, len(req.Articles), req.PageCount)
 	s.workspaceLogJSON(workspace, "build: style JSON", style)
 	s.workspaceLogJSON(workspace, "build: input articles", articleLogEntries(req.Articles, false))
+	issue := newIssueContext(time.Now())
+	s.workspaceLogJSON(workspace, "build: issue JSON", issue)
 	for i := range req.Articles {
 		if req.Articles[i].Enhanced {
 			continue
@@ -778,7 +835,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewritten %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
 	}
 	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Generating creative kit", Running: true})
-	kit, err := s.generateCreativeKit(ctx, req, style)
+	kit, err := s.generateCreativeKit(ctx, req, style, issue)
 	if err != nil {
 		log.Printf("defapi text creative kit failed: %v", err)
 		s.workspaceLog(workspace, "build: creative kit failed: %v", err)
@@ -790,7 +847,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Plan ready", Running: false})
 	completed = true
 	s.workspaceLog(workspace, "build: complete")
-	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, Articles: req.Articles, Pages: planMagazine(req, style, kit), Workspace: workspace})
+	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, Articles: req.Articles, Pages: planMagazine(req, style, kit, issue), Issue: issue, Workspace: workspace})
 }
 
 func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {
@@ -821,7 +878,8 @@ func (s *server) handleCoverPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.workspaceLog(workspace, "cover-plan: start pages=%d", len(req.Pages))
-	plan, err := s.generateCoverPlan(ctx, req.Title, req.Style, req.Pages)
+	issue := normalizeIssueContext(req.Issue, time.Now())
+	plan, err := s.generateCoverPlan(ctx, req.Title, req.Style, req.Pages, issue)
 	if err != nil {
 		s.workspaceLog(workspace, "cover-plan: failed: %v", err)
 		plan = fallbackCoverPlan(req.Style, req.Pages)
@@ -847,7 +905,8 @@ func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	req.Page.Prompt = s.pagePromptWithFurniture(ctx, req.Style, req.Page)
+	issue := normalizeIssueContext(req.Issue, time.Now())
+	req.Page.Prompt = s.pagePromptWithFurniture(ctx, req.Style, req.Page, issue)
 	s.workspaceLog(workspace, "render-page: start page=%d title=%q refs=%d", req.Page.Number, req.Page.Title, len(images))
 	image, err := s.runDefapiImageWithRetry(ctx, workspace, req.Page.Number, limitPrompt(req.Page.Prompt, s.cfg.DefapiImageMaxPromptChars), images)
 	if err != nil {
@@ -1013,8 +1072,8 @@ func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath s
 	return parsed, nil
 }
 
-func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, style magazineStyle) (creativeKit, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, captions, backPage. Make departments, sidebars and captions arrays of 18-24 unique short strings each. Make adverts and backPage arrays of 10-16 unique short strings each. Every string must describe one specific reusable page element, never a duplicate or near-duplicate. Prepare issue-wide generic page elements for a %s called %q. Match this style and tone: %s. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), articleList(req.Articles))
+func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, style magazineStyle, issue issueContext) (creativeKit, error) {
+	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, captions, backPage. Make departments, sidebars and captions arrays of 18-24 unique short strings each. Make adverts and backPage arrays of 10-16 unique short strings each. Every string must describe one specific reusable page element, never a duplicate or near-duplicate. Prepare issue-wide generic page elements for a %s called %q. Match this style and tone: %s. Issue context: %s. Use that exact issue number/date/year when an element needs issue metadata; otherwise omit issue metadata. Do not invent a different issue number, year or date. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), issueContextLine(issue), articleList(req.Articles))
 	text, err := s.runDefapiText(ctx, prompt, 1800)
 	if err != nil {
 		return creativeKit{}, err
@@ -1125,8 +1184,8 @@ func (s *server) generateArticles(ctx context.Context, title string, style magaz
 	return cleaned, nil
 }
 
-func (s *server) generateCoverPlan(ctx context.Context, title string, style magazineStyle, pages []pagePlan) (coverPlan, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys language, mainStoryTitle, lines. The lines value must be an array of 4-7 objects with keys page, title, label and role. Choose the strongest cover lines from the final page order. Identify exactly one main story using mainStoryTitle and role=\"main\" on that line. Translate page labels into the publication language; do not use English-only shorthand like p2 unless that is natural for the language. Use the final page numbers exactly as supplied. Avoid adverts unless the issue has too few editorial pages.\n\nPUBLICATION: %s\nLANGUAGE: %s\nSTYLE: %s\nFINAL PAGES:\n%s", emptyDefault(title, style.Name), emptyDefault(style.Language, "English"), styleLine(style, "cover"), pageListForCover(pages))
+func (s *server) generateCoverPlan(ctx context.Context, title string, style magazineStyle, pages []pagePlan, issue issueContext) (coverPlan, error) {
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys language, mainStoryTitle, lines. The lines value must be an array of 4-7 objects with keys page, title, label and role. Choose the strongest cover lines from the final page order. Identify exactly one main story using mainStoryTitle and role=\"main\" on that line. Translate page labels into the publication language; do not use English-only shorthand like p2 unless that is natural for the language. Use the final page numbers exactly as supplied. Use this exact issue context if issue metadata appears: %s. Do not invent a different issue number, year or date. Avoid adverts unless the issue has too few editorial pages.\n\nPUBLICATION: %s\nLANGUAGE: %s\nSTYLE: %s\nFINAL PAGES:\n%s", issueContextLine(issue), emptyDefault(title, style.Name), emptyDefault(style.Language, "English"), styleLine(style, "cover"), pageListForCover(pages))
 	text, err := s.runDefapiText(ctx, prompt, 900)
 	if err != nil {
 		return coverPlan{}, err
@@ -1154,8 +1213,8 @@ type pageFurniture struct {
 	Footer string `json:"footer"`
 }
 
-func (s *server) generatePageFurniture(ctx context.Context, style magazineStyle, page pagePlan) (pageFurniture, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys header and footer. Write very short localized magazine page furniture in %s. Tone: %s. Header: 1-5 words suitable for a running header or section slug for this page. Footer: 1-6 words that can sit beside page number %d. Use the article/page content, do not repeat a long headline. Match this publication style: %s.\n\nPAGE KIND: %s\nPAGE TITLE: %s\nPAGE BODY: %s", emptyDefault(style.Language, "English"), emptyDefault(style.Tone, "editorial"), page.Number, styleLine(style, page.Kind), page.Kind, page.Title, pageBodyForFurniture(page))
+func (s *server) generatePageFurniture(ctx context.Context, style magazineStyle, page pagePlan, issue issueContext) (pageFurniture, error) {
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys header and footer. Write very short localized magazine page furniture in %s. Tone: %s. Header: 1-5 words suitable for a running header or section slug for this page. Footer: 1-6 words that can sit beside page number %d. Issue context: %s. If header/footer includes issue metadata, use exactly that number/date/year; otherwise omit issue metadata. Do not invent a different issue number, year or date. Use the article/page content, do not repeat a long headline. Match this publication style: %s.\n\nPAGE KIND: %s\nPAGE TITLE: %s\nPAGE BODY: %s", emptyDefault(style.Language, "English"), emptyDefault(style.Tone, "editorial"), page.Number, issueContextLine(issue), styleLine(style, page.Kind), page.Kind, page.Title, pageBodyForFurniture(page))
 	text, err := s.runDefapiText(ctx, prompt, 300)
 	if err != nil {
 		return pageFurniture{}, err
@@ -1172,11 +1231,11 @@ func (s *server) generatePageFurniture(ctx context.Context, style magazineStyle,
 	return out, nil
 }
 
-func (s *server) pagePromptWithFurniture(ctx context.Context, style magazineStyle, page pagePlan) string {
+func (s *server) pagePromptWithFurniture(ctx context.Context, style magazineStyle, page pagePlan, issue issueContext) string {
 	if strings.EqualFold(page.Kind, "cover") {
 		return page.Prompt
 	}
-	copy, err := s.generatePageFurniture(ctx, style, page)
+	copy, err := s.generatePageFurniture(ctx, style, page, issue)
 	if err != nil {
 		log.Printf("defapi text page furniture failed for page %d: %v", page.Number, err)
 		copy = fallbackPageFurniture(style, page)
@@ -1186,6 +1245,7 @@ func (s *server) pagePromptWithFurniture(ctx context.Context, style magazineStyl
 	payload := map[string]any{
 		"header":   copy.Header,
 		"footer":   copy.Footer,
+		"issue":    issue,
 		"language": emptyDefault(style.Language, "English"),
 		"side":     side,
 		"page":     page.Number,
@@ -1764,21 +1824,21 @@ func fetchURLText(ctx context.Context, rawURL string, maxBytes int64) (string, e
 
 var fetchURLTextFunc = fetchURLText
 
-func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []pagePlan {
+func planMagazine(req buildRequest, style magazineStyle, kit creativeKit, issue issueContext) []pagePlan {
 	pages := make([]pagePlan, 0, req.PageCount)
 	title := emptyDefault(req.Title, "Untitled Magazine")
 	magType := emptyDefault(req.MagazineType, "magazine")
 	modules := newModulePlanner(kit)
-	pages = append(pages, pagePlan{Number: 1, Kind: "cover", Title: "Cover", Prompt: coverPrompt(title, magType, style, req.Articles)})
+	pages = append(pages, pagePlan{Number: 1, Kind: "cover", Title: "Cover", Prompt: coverPrompt(title, magType, style, req.Articles, issue)})
 	itemIndex := 0
 	itemPart := 0
 	for n := 2; n <= req.PageCount; n++ {
 		if n == req.PageCount {
-			pages = append(pages, pagePlan{Number: n, Kind: "back-page", Title: "Back page", Prompt: genericPrompt(n, title, style, modules.next("back", 4, n), "back", "Create a strong back page: advert, subscription panel, teaser, index, or closing visual depending on the publication style.")})
+			pages = append(pages, pagePlan{Number: n, Kind: "back-page", Title: "Back page", Prompt: genericPrompt(n, title, style, modules.next("back", 4, n), "back", "Create a strong back page: advert, subscription panel, teaser, index, or closing visual depending on the publication style.", issue)})
 			continue
 		}
 		if itemPart == 0 && isAdvertPage(n, req.PageCount) {
-			pages = append(pages, pagePlan{Number: n, Kind: "advert", Title: "Advert", Prompt: genericPrompt(n, title, style, modules.next("advert", 4, n), "advert", "Create a full-page fictional advert that belongs naturally in this publication. Use no real brands unless supplied by the article content.")})
+			pages = append(pages, pagePlan{Number: n, Kind: "advert", Title: "Advert", Prompt: genericPrompt(n, title, style, modules.next("advert", 4, n), "advert", "Create a full-page fictional advert that belongs naturally in this publication. Use no real brands unless supplied by the article content.", issue)})
 			continue
 		}
 		if itemIndex < len(req.Articles) {
@@ -1792,19 +1852,19 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit) []page
 			if kind != "feature" && len([]rune(a.Body)) > 1800 {
 				kind = "feature"
 			}
-			pages = append(pages, pagePlan{Number: n, Kind: kind, Title: a.Title, Article: &a, Images: a.Images, Prompt: articlePrompt(n, title, style, modules.next(kind, 3, n), kind, a, itemPart, totalParts)})
+			pages = append(pages, pagePlan{Number: n, Kind: kind, Title: a.Title, Article: &a, Images: a.Images, Prompt: articlePrompt(n, title, style, modules.next(kind, 3, n), kind, a, itemPart, totalParts, issue)})
 			if itemPart >= totalParts {
 				itemIndex++
 				itemPart = 0
 			}
 			continue
 		}
-		pages = append(pages, pagePlan{Number: n, Kind: "filler", Title: "Departments", Prompt: genericPrompt(n, title, style, modules.next("filler", 4, n), "filler", "Create a department/filler page with short recurring modules, briefs, reader notes, charts, sidebars, small adverts, captions, and visual rhythm suited to the publication.")})
+		pages = append(pages, pagePlan{Number: n, Kind: "filler", Title: "Departments", Prompt: genericPrompt(n, title, style, modules.next("filler", 4, n), "filler", "Create a department/filler page with short recurring modules, briefs, reader notes, charts, sidebars, small adverts, captions, and visual rhythm suited to the publication.", issue)})
 	}
 	return pages
 }
 
-func coverPrompt(title, magType string, style magazineStyle, articles []article) string {
+func coverPrompt(title, magType string, style magazineStyle, articles []article, issue issueContext) string {
 	return imagePromptJSON(map[string]any{
 		"task": "Create the magazine cover.",
 		"metadata": map[string]any{
@@ -1814,20 +1874,21 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article)
 			"language":         emptyDefault(style.Language, "English"),
 			"format":           pageFormatInstruction(),
 			"tone":             emptyDefault(style.Tone, "editorial"),
+			"issue":            issue,
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, "cover"),
 		},
 		"content": map[string]any{
 			"masthead":     title,
-			"requirements": "issue date, price/barcode or equivalent cover furniture, strong hierarchy",
+			"requirements": "use the supplied issue number/date/year for issue furniture if shown, price/barcode or equivalent cover furniture, strong hierarchy",
 			"cover_lines":  "story references and final page numbers are supplied at render time",
 		},
 		"constraints": []string{"full page visible", "no crop", "consistent print magazine design", "avoid " + style.Avoid},
 	})
 }
 
-func articlePrompt(n int, title string, style magazineStyle, modules, kind string, a article, part, totalParts int) string {
+func articlePrompt(n int, title string, style magazineStyle, modules, kind string, a article, part, totalParts int, issue issueContext) string {
 	series := ""
 	if totalParts > 1 {
 		series = fmt.Sprintf("This is page %d of %d for this item. Continue the same story/feature without repeating the same layout.", part, totalParts)
@@ -1840,6 +1901,7 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 			"language":    emptyDefault(style.Language, "English"),
 			"format":      pageFormatInstruction(),
 			"tone":        emptyDefault(style.Tone, "editorial"),
+			"issue":       issue,
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, kind),
@@ -1867,7 +1929,7 @@ func normalizedArticlePages(a article) int {
 	return a.Pages
 }
 
-func genericPrompt(n int, title string, style magazineStyle, modules, kind, task string) string {
+func genericPrompt(n int, title string, style magazineStyle, modules, kind, task string, issue issueContext) string {
 	return imagePromptJSON(map[string]any{
 		"task": task,
 		"metadata": map[string]any{
@@ -1876,6 +1938,7 @@ func genericPrompt(n int, title string, style magazineStyle, modules, kind, task
 			"language":    emptyDefault(style.Language, "English"),
 			"format":      pageFormatInstruction(),
 			"tone":        emptyDefault(style.Tone, "editorial"),
+			"issue":       issue,
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, kind),

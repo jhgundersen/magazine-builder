@@ -236,11 +236,12 @@ func TestCommandArgsSkipsEmptyCategory(t *testing.T) {
 
 func TestPromptsIncludePageSideAndFolioSide(t *testing.T) {
 	style := fallbackStyle("quiet magazine", "")
-	got := articlePrompt(2, "Test", style, "quote box; timeline", "article", article{Title: "A", Body: "Body"}, 1, 1)
+	issue := issueContext{Number: 120, Year: 2026, Date: "2026-04-30", Label: "Issue 120, 2026"}
+	got := articlePrompt(2, "Test", style, "quote box; timeline", "article", article{Title: "A", Body: "Body"}, 1, 1, issue)
 	if strings.Contains(got, "left-hand page") || strings.Contains(got, "Put page number 2") {
 		t.Fatalf("editable article prompt should not include final page placement: %s", got)
 	}
-	got = genericPrompt(3, "Test", style, "reader mail; chart", "filler", "Task")
+	got = genericPrompt(3, "Test", style, "reader mail; chart", "filler", "Task", issue)
 	if strings.Contains(got, "right-hand page") || strings.Contains(got, "Put page number 3") {
 		t.Fatalf("editable generic prompt should not include final page placement: %s", got)
 	}
@@ -252,7 +253,7 @@ func TestPlanKeepsMultiPageArticleContiguousAcrossAdvertSlot(t *testing.T) {
 		PageCount: 8,
 		Articles:  []article{{Title: "Long item", Body: "Body", Pages: 3}},
 	}
-	pages := planMagazine(req, fallbackStyle("quiet", ""), fallbackCreativeKit(req))
+	pages := planMagazine(req, fallbackStyle("quiet", ""), fallbackCreativeKit(req), issueContext{Number: 120, Year: 2026, Date: "2026-04-30", Label: "Issue 120, 2026"})
 	got := []string{pages[1].Title, pages[2].Title, pages[3].Title}
 	for i, title := range got {
 		if title != "Long item" {

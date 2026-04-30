@@ -507,6 +507,7 @@ function normalizeImportedPlan(raw) {
   data.style = data.style || {};
   data.creativeKit = data.creativeKit || {};
   data.articles = Array.isArray(data.articles) ? data.articles : [];
+  data.issue = normalizeIssue(data.issue);
   return data;
 }
 $("render").onclick = (e) =>
@@ -794,6 +795,7 @@ function buildArticlePromptClient(page, a) {
       format:
         "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
       tone: style.tone || "editorial",
+      issue: issueContext(),
     },
     style: {
       visual_brief: visualStyleBrief(kind),
@@ -994,6 +996,7 @@ async function generateCoverPlan() {
       title: $("title").value,
       style: lastPlan.style || {},
       pages: lastPlan.pages || [],
+      issue: issueContext(),
       workspace,
       apiKey,
       textModel,
@@ -1082,6 +1085,7 @@ async function renderPage(page, styleReference) {
     body: JSON.stringify({
       page: renderPage,
       style: lastPlan.style || {},
+      issue: issueContext(),
       styleReference,
       reference: ref,
       workspace,
@@ -1105,6 +1109,7 @@ function finalRenderPrompt(page) {
     page_number: page.number,
     side,
     language: ((lastPlan && lastPlan.style) || {}).language || "English",
+    issue: issueContext(),
     footer_folio:
       "Put page number " +
       page.number +
@@ -1123,6 +1128,7 @@ function finalRenderPrompt(page) {
     prompt.metadata = Object.assign({}, prompt.metadata || {}, {
       language: ((lastPlan && lastPlan.style) || {}).language || "English",
       tone: ((lastPlan && lastPlan.style) || {}).tone || "editorial",
+      issue: issueContext(),
     });
     prompt.style = {
       visual_brief: visualStyleBrief(page.kind || "content"),
@@ -1179,6 +1185,7 @@ function cleanPromptFromPage(page) {
       page_role: page.kind || "article",
       language: style.language || "English",
       tone: style.tone || "editorial",
+      issue: issueContext(),
       format:
         "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
     },
@@ -1207,6 +1214,33 @@ function compactClient(s, max) {
     .replace(/\s+/g, " ")
     .trim();
   return s.length > max ? s.slice(0, max).trim() + "..." : s;
+}
+function issueContext() {
+  if (lastPlan && lastPlan.issue) {
+    lastPlan.issue = normalizeIssue(lastPlan.issue);
+    return lastPlan.issue;
+  }
+  const issue = normalizeIssue(null);
+  if (lastPlan) lastPlan.issue = issue;
+  return issue;
+}
+function normalizeIssue(issue) {
+  const now = new Date();
+  const local = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const iso =
+    now.getFullYear() +
+    "-" +
+    String(now.getMonth() + 1).padStart(2, "0") +
+    "-" +
+    String(now.getDate()).padStart(2, "0");
+  const start = new Date(now.getFullYear(), 0, 0);
+  const day = Math.floor((local - start) / 86400000);
+  const out = Object.assign({}, issue || {});
+  out.year = parseInt(out.year || now.getFullYear(), 10);
+  out.number = parseInt(out.number || day, 10);
+  out.date = String(out.date || iso);
+  out.label = String(out.label || "Issue " + out.number + ", " + out.year);
+  return out;
 }
 function pageModules(page) {
   if (page.content && page.content.modules) return page.content.modules;
