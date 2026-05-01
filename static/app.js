@@ -1094,11 +1094,6 @@ async function startRenderFlow() {
     setRenderProgress("Planning cover lines");
     lastPlan.coverPlan = await generateCoverPlan();
     completeRenderCall("Cover plan ready");
-    setRenderProgress("Rendering cover");
-    let cover = await renderPage(lastPlan.pages[0], "");
-    renderedImages[1] = cover;
-    completeRenderCall("Cover rendered");
-    renderPlan(lastPlan);
     await renderRemainingPages();
   } catch (e) {
     $("renderStatus").textContent = e.message || "Render failed";
@@ -1128,20 +1123,20 @@ async function generateCoverPlan() {
 }
 async function renderRemainingPages() {
   try {
-    const middle = lastPlan.pages.slice(1);
-    setRenderProgress("Rendering content pages");
-    for (let i = 0; i < middle.length; i += 3) {
-      await Promise.all(
-        middle.slice(i, i + 3).map(async (p) => {
-          setStatus(p.number, "Defapi image call queued...");
-          const img = await renderPage(p, "");
-          renderedImages[p.number] = img;
-          completeRenderCall("Rendered page " + p.number);
-          renderPlan(lastPlan);
-        }),
-      );
-      setRenderProgress("Rendering content pages");
+    const pages = lastPlan.pages.slice();
+    setRenderProgress("Rendering pages");
+    let index = 0;
+    async function worker() {
+      while (index < pages.length) {
+        const p = pages[index++];
+        setStatus(p.number, "Defapi image call queued...");
+        const img = await renderPage(p, "");
+        renderedImages[p.number] = img;
+        completeRenderCall("Rendered page " + p.number);
+        renderPlan(lastPlan);
+      }
     }
+    await Promise.all([worker(), worker(), worker()]);
     const ordered = lastPlan.pages
       .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
       .filter(Boolean);
