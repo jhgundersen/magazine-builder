@@ -1637,15 +1637,30 @@ func fallbackPageFurniture(style magazineStyle, page pagePlan) pageFurniture {
 
 func pageListForCover(pages []pagePlan) string {
 	parts := []string{}
-	for _, p := range pages {
+	i := 0
+	for i < len(pages) {
+		p := pages[i]
 		if p.Number <= 1 {
+			i++
 			continue
+		}
+		// Merge consecutive pages belonging to the same multi-page article.
+		j := i + 1
+		if p.Article != nil && p.Article.Pages > 1 {
+			for j < len(pages) && pages[j].Article != nil && pages[j].Article.Title == p.Article.Title {
+				j++
+			}
+		}
+		pageRef := fmt.Sprintf("page %d", p.Number)
+		if j > i+1 {
+			pageRef = fmt.Sprintf("pages %d-%d", p.Number, pages[j-1].Number)
 		}
 		body := ""
 		if p.Article != nil {
 			body = compact(p.Article.Body, 180)
 		}
-		parts = append(parts, fmt.Sprintf("- page %d | kind=%s | title=%s | body=%s", p.Number, p.Kind, emptyDefault(p.Title, "Untitled"), body))
+		parts = append(parts, fmt.Sprintf("- %s | kind=%s | title=%s | body=%s", pageRef, p.Kind, emptyDefault(p.Title, "Untitled"), body))
+		i = j
 	}
 	return strings.Join(parts, "\n")
 }
