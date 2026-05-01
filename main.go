@@ -1254,7 +1254,7 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 		a.Title = cleanText(out.Title)
 	}
 	if strings.TrimSpace(out.Body) != "" {
-		a.Body = cleanText(out.Body)
+		a.Body = compact(cleanText(out.Body), articleBodyMaxChars(style))
 	}
 	a.Enhanced = true
 	return a, nil
@@ -1280,7 +1280,7 @@ func (s *server) rewriteManualArticleForStyle(ctx context.Context, a article, st
 		a.Title = cleanText(out.Title)
 	}
 	if strings.TrimSpace(out.Body) != "" {
-		a.Body = cleanText(out.Body)
+		a.Body = compact(cleanText(out.Body), articleBodyMaxChars(style))
 	}
 	a.Enhanced = true
 	return a, nil
@@ -1358,11 +1358,33 @@ func articleLengthGuidanceFromStyle(raw string) articleLengthGuidance {
 	if min <= 0 || max <= 0 {
 		min, max = 700, 1300
 	}
+	if max > 1600 {
+		max = 1600
+	}
+	if min > max {
+		min = max * 2 / 3
+	}
 	return articleLengthGuidance{
 		Range:     fmt.Sprintf("%d-%d", min, max),
 		Guidance:  raw,
 		MaxTokens: maxTokensForCharTarget(max),
 	}
+}
+
+// articleBodyMaxChars returns the max body chars for the style (upper bound of
+// the articleLength range, capped at 1600).
+func articleBodyMaxChars(style magazineStyle) int {
+	if strings.TrimSpace(style.ArticleLength) == "" {
+		return 1300
+	}
+	_, max := firstIntRange(style.ArticleLength)
+	if max <= 0 {
+		return 1300
+	}
+	if max > 1600 {
+		max = 1600
+	}
+	return max
 }
 
 func (g articleLengthGuidance) withJSONBudget() articleLengthGuidance {
@@ -2237,7 +2259,7 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 		},
 		"content": map[string]any{
 			"title":            a.Title,
-			"brief_body":       compact(a.Body, 1900),
+			"brief_body":       compact(a.Body, 800),
 			"series_note":      series,
 			"modules":          modules,
 			"image_text_notes": articleImageTextNotes(a),
