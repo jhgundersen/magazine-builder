@@ -3,3 +3,4 @@ bin/
 *.pdf
 .codex
 tmp/
+magazine-builder

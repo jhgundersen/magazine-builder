@@ -1499,12 +1499,8 @@ type pageFurniture struct {
 
 func (s *server) generatePageFurniture(ctx context.Context, style magazineStyle, page pagePlan, issue issueContext) (pageFurniture, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON with keys header and footer. Write very short localized magazine page furniture in %s. Tone: %s. Header: 1-5 words suitable for a running header or section slug for this page. Footer: 1-6 words that can sit beside page number %d. Issue context: %s. If header/footer includes issue metadata, use exactly that number/date/year; otherwise omit issue metadata. Do not invent a different issue number, year or date. Use the article/page content, do not repeat a long headline. Match this publication style: %s.\n\nPAGE KIND: %s\nPAGE TITLE: %s\nPAGE BODY: %s", emptyDefault(style.Language, "English"), emptyDefault(style.Tone, "editorial"), page.Number, issueContextLine(issue), styleLine(style, page.Kind), page.Kind, page.Title, pageBodyForFurniture(page))
-	text, err := s.runDefapiText(ctx, prompt, 2000)
-	if err != nil {
-		return pageFurniture{}, err
-	}
 	var out pageFurniture
-	if err := json.Unmarshal([]byte(extractJSONObject(text)), &out); err != nil {
+	if err := s.runDefapiTextJSON(ctx, prompt, 2000, &out); err != nil {
 		return pageFurniture{}, err
 	}
 	out.Header = compact(cleanText(out.Header), 60)
