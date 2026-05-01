@@ -1,0 +1,12 @@
+services:
+  magazine-builder:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/app/magazine-work
+    command:
+      - magazine-builder
+      - -workdir=/app/magazine-work
+      - -workspace-max-age=48h

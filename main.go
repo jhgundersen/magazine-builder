@@ -43,6 +43,7 @@ var embeddedStatic embed.FS
 type config struct {
 	Addr                      string
 	WorkDir                   string
+	WorkspaceMaxAge           time.Duration
 	DefapiTextCmd             string
 	DefapiTextCategory        string
 	DefapiTextModel           string
@@ -431,6 +432,9 @@ func main() {
 		log.Fatal(err)
 	}
 	s := &server{cfg: cfg, progress: map[string]progressStatus{}}
+	if cfg.WorkspaceMaxAge > 0 {
+		go s.cleanupLoop()
+	}
 	handler, err := s.routes()
 	if err != nil {
 		log.Fatal(err)
@@ -463,6 +467,7 @@ func parseFlags() config {
 	cfg := config{}
 	flag.StringVar(&cfg.Addr, "addr", ":8080", "HTTP listen address")
 	flag.StringVar(&cfg.WorkDir, "workdir", "magazine-work", "directory for uploads and generated artifacts")
+	flag.DurationVar(&cfg.WorkspaceMaxAge, "workspace-max-age", 48*time.Hour, "delete workspaces older than this (0 disables)")
 	flag.StringVar(&cfg.DefapiTextCmd, "defapi-text", "defapi", "defapi text command")
 	flag.StringVar(&cfg.DefapiTextCategory, "defapi-text-category", "text", "defapi text category")
 	flag.StringVar(&cfg.DefapiTextModel, "defapi-text-model", "claude", "defapi text model")
@@ -1104,6 +1109,36 @@ func (s *server) progressStatus(workspace, kind string) progressStatus {
 
 func (s *server) workspaceDir(workspace string) string {
 	return filepath.Join(s.cfg.WorkDir, sanitizeWorkspace(workspace))
+}
+
+func (s *server) cleanupLoop() {
+	for {
+		s.cleanupWorkspaces()
+		time.Sleep(time.Hour)
+	}
+}
+
+func (s *server) cleanupWorkspaces() {
+	entries, err := os.ReadDir(s.cfg.WorkDir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-s.cfg.WorkspaceMaxAge)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			dir := filepath.Join(s.cfg.WorkDir, e.Name())
+			if err := os.RemoveAll(dir); err == nil {
+				log.Printf("cleanup: removed workspace %s (age %s)", e.Name(), time.Since(info.ModTime()).Round(time.Minute))
+			}
+		}
+	}
 }
 
 func (s *server) workspaceURL(workspace, rel string) string {
