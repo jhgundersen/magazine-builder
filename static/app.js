@@ -166,7 +166,7 @@ function renderArticles() {
       (kind === "article" ? "selected" : "") +
       '>Article</option><option value="feature" ' +
       (kind === "feature" ? "selected" : "") +
-      '>Feature page</option></select></div><div><label>Pages</label><input type="number" min="1" max="8" value="' +
+      '>Feature page</option></select></div><div><label>Pages</label><input type="number" min="1" max="4" value="' +
       esc(a.pages || 1) +
       '" data-i="' +
       i +
@@ -200,7 +200,7 @@ function renderArticles() {
               .map((s) => s.trim())
               .filter(Boolean)
           : k === "pages"
-            ? Math.max(1, Math.min(8, parseInt(e.target.value || "1", 10)))
+            ? Math.max(1, Math.min(4, parseInt(e.target.value || "1", 10)))
             : e.target.value;
       articles[i].enhanced = false;
       if (k === "kind") renderArticles();
@@ -596,7 +596,7 @@ function normalizeArticlesForImport(list) {
             .map((s) => s.trim())
             .filter(Boolean)
         : [];
-      a.pages = Math.max(1, Math.min(8, parseInt(a.pages || "1", 10)));
+      a.pages = Math.max(1, Math.min(4, parseInt(a.pages || "1", 10)));
       a.enhanced = Boolean(a.enhanced);
       if (a.source) a.source = String(a.source);
       return a;

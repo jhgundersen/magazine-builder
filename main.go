@@ -109,14 +109,20 @@ type generateArticlesRequest struct {
 	TextModel string `json:"textModel"`
 }
 
+type articleSection struct {
+	Body       string `json:"body"`
+	ImageBrief string `json:"image_brief"`
+}
+
 type article struct {
-	Title    string   `json:"title"`
-	Body     string   `json:"body"`
-	Images   []string `json:"images"`
-	Source   string   `json:"source,omitempty"`
-	Enhanced bool     `json:"enhanced,omitempty"`
-	Kind     string   `json:"kind,omitempty"`
-	Pages    int      `json:"pages,omitempty"`
+	Title    string           `json:"title"`
+	Body     string           `json:"body"`
+	Sections []articleSection `json:"sections,omitempty"`
+	Images   []string         `json:"images"`
+	Source   string           `json:"source,omitempty"`
+	Enhanced bool             `json:"enhanced,omitempty"`
+	Kind     string           `json:"kind,omitempty"`
+	Pages    int              `json:"pages,omitempty"`
 }
 
 type buildRequest struct {
@@ -1230,17 +1236,25 @@ func (s *server) generateBrandAssets(ctx context.Context, workspace string, req 
 }
 
 func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
-	bodyRange := "900-1600"
-	bodySample := compact(a.Body, 3200)
-	maxTokens := 2000
+	pages := normalizedArticlePages(a)
+	bodyMax := articleBodyMaxChars(style, a)
+	bodyRange := fmt.Sprintf("900-%d", bodyMax)
+	bodySample := compact(a.Body, 3200*pages)
+	maxTokens := maxTokensForCharTarget(bodyMax)
+	if maxTokens < 2000 {
+		maxTokens = 2000
+	}
 	if a.Kind == "podcast" {
-		bodyRange = "1800-2800"
+		bodyRange = fmt.Sprintf("1800-%d", max(2800, bodyMax))
 		bodySample = sampleLongText(a.Body, 6500)
-		maxTokens = 3000
+		maxTokens = max(maxTokens, 3000)
 	}
 	lengthNote := strings.TrimSpace(style.ArticleLength)
 	if lengthNote == "" {
 		lengthNote = "Use coherent paragraphs or short page-ready chunks as the style demands."
+	}
+	if pages > 1 {
+		return s.rewriteArticleForStyleMultiPage(ctx, a, style, pages, bodyRange, bodyMax, bodySample, lengthNote, maxTokens)
 	}
 	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Rewrite this imported source into print-ready magazine copy matching the publication concept, style and text tone. If the publication is comic-led, satirical, tabloid, puzzle-like, literary, technical, or otherwise strongly formatted, make the copy sound and structure fit that format. Keep facts, names, chronology, arguments, concrete examples and useful nuance. Remove web/navigation language, links, embeds, YouTube mentions, newsletter prompts, transcript mechanics and SEO clutter. Title should fit the publication voice. Body length and structure should match this style guidance: %s. Body should be %s characters unless the guidance clearly requires a shorter visual format.\n\nSTYLE AND TONE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s", lengthNote, bodyRange, styleLine(style, "article"), a.Title, bodySample)
 	var out struct {
@@ -1254,7 +1268,46 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 		a.Title = cleanText(out.Title)
 	}
 	if strings.TrimSpace(out.Body) != "" {
-		a.Body = compact(cleanText(out.Body), articleBodyMaxChars(style))
+		a.Body = compact(cleanText(out.Body), articleBodyMaxChars(style, a))
+	}
+	a.Enhanced = true
+	return a, nil
+}
+
+func (s *server) rewriteArticleForStyleMultiPage(ctx context.Context, a article, style magazineStyle, pages int, bodyRange string, bodyMax int, bodySample, lengthNote string, maxTokens int) (article, error) {
+	pageDescs := make([]string, pages)
+	perPage := bodyMax / pages
+	pageDescs[0] = fmt.Sprintf("page 1: opening — headline intro, deck, byline and opening section (~%d chars)", perPage)
+	for i := 1; i < pages; i++ {
+		if i == 2 && pages > 4 {
+			pageDescs[i] = fmt.Sprintf("page %d: visual break — one striking image caption or pull quote only (~200 chars)", i+1)
+		} else {
+			pageDescs[i] = fmt.Sprintf("page %d: continuation — body columns, pull quotes, closing (~%d chars)", i+1, perPage)
+		}
+	}
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and sections. sections is an array of exactly %d objects, one per magazine page, each with keys body and image_brief. body is the print-ready article text for that page in the publication style. image_brief is 1-3 sentences describing what to draw or photograph for that page — write it as a visual instruction to an image generator, not as prose. Rewrite this source to fit this %d-page layout: %s. Body length guidance per page: %s. Style: %s. Remove web/navigation language, links, embeds and SEO clutter.\n\nSTYLE AND TONE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s",
+		pages, pages, strings.Join(pageDescs, "; "), bodyRange, lengthNote, styleLine(style, "article"), a.Title, bodySample)
+	var out struct {
+		Title    string           `json:"title"`
+		Sections []articleSection `json:"sections"`
+	}
+	if err := s.runDefapiTextJSON(ctx, prompt, maxTokens, &out); err != nil {
+		return a, err
+	}
+	if strings.TrimSpace(out.Title) != "" {
+		a.Title = cleanText(out.Title)
+	}
+	if len(out.Sections) > 0 {
+		bodies := make([]string, 0, len(out.Sections))
+		for i := range out.Sections {
+			out.Sections[i].Body = compact(cleanText(out.Sections[i].Body), perPage+200)
+			out.Sections[i].ImageBrief = compact(cleanText(out.Sections[i].ImageBrief), 300)
+			if out.Sections[i].Body != "" {
+				bodies = append(bodies, out.Sections[i].Body)
+			}
+		}
+		a.Sections = out.Sections
+		a.Body = strings.Join(bodies, "\n\n")
 	}
 	a.Enhanced = true
 	return a, nil
@@ -1280,7 +1333,7 @@ func (s *server) rewriteManualArticleForStyle(ctx context.Context, a article, st
 		a.Title = cleanText(out.Title)
 	}
 	if strings.TrimSpace(out.Body) != "" {
-		a.Body = compact(cleanText(out.Body), articleBodyMaxChars(style))
+		a.Body = compact(cleanText(out.Body), articleBodyMaxChars(style, a))
 	}
 	a.Enhanced = true
 	return a, nil
@@ -1371,20 +1424,22 @@ func articleLengthGuidanceFromStyle(raw string) articleLengthGuidance {
 	}
 }
 
-// articleBodyMaxChars returns the max body chars for the style (upper bound of
-// the articleLength range, capped at 1600).
-func articleBodyMaxChars(style magazineStyle) int {
-	if strings.TrimSpace(style.ArticleLength) == "" {
-		return 1300
+// articleBodyMaxChars returns the max body chars for the style, scaled by the
+// number of pages the article occupies. The per-page cap is 1600; multi-page
+// articles get proportionally more so the full body can cover all pages.
+func articleBodyMaxChars(style magazineStyle, a article) int {
+	perPage := 1600
+	if strings.TrimSpace(style.ArticleLength) != "" {
+		_, max := firstIntRange(style.ArticleLength)
+		if max > 0 && max < perPage {
+			perPage = max
+		}
 	}
-	_, max := firstIntRange(style.ArticleLength)
-	if max <= 0 {
-		return 1300
+	pages := normalizedArticlePages(a)
+	if pages < 1 {
+		pages = 1
 	}
-	if max > 1600 {
-		max = 1600
-	}
-	return max
+	return perPage * pages
 }
 
 func (g articleLengthGuidance) withJSONBudget() articleLengthGuidance {
@@ -2240,10 +2295,63 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article,
 }
 
 func articlePrompt(n int, title string, style magazineStyle, modules, kind string, a article, part, totalParts int, issue issueContext) string {
-	series := ""
+	bodyText := compact(a.Body, 800)
+	seriesNote := ""
+	storyOverview := ""
+	layoutRequired := "headline, deck, byline/source if available, readable columns, image slots, article-specific image text, pull quote/sidebar where useful"
+
 	if totalParts > 1 {
-		series = fmt.Sprintf("This is page %d of %d for this item. Continue the same story/feature without repeating the same layout.", part, totalParts)
+		// storyOverview gives every page the full article arc as context.
+		storyOverview = compact(a.Body, 400)
+
+		// Use pre-generated section image briefs when available (multi-page rewrite).
+		idx := part - 1
+		if idx < len(a.Sections) && strings.TrimSpace(a.Sections[idx].ImageBrief) != "" {
+			bodyText = a.Sections[idx].ImageBrief
+		} else {
+			// Fallback: split body by page index.
+			runes := []rune(a.Body)
+			sliceLen := len(runes) / totalParts
+			start := idx * sliceLen
+			end := start + sliceLen
+			if end > len(runes) || part == totalParts {
+				end = len(runes)
+			}
+			bodyText = compact(string(runes[start:end]), 400)
+		}
+
+		switch {
+		case part == 1:
+			seriesNote = fmt.Sprintf("Page 1 of %d: opening page. Lead with a strong hero image, large headline, deck and the opening section of the story. Leave the continuation for the next page.", totalParts)
+			layoutRequired = "large hero image or illustration, headline, deck, byline, opening body text, page number"
+		case part == 3 && totalParts > 4:
+			seriesNote = fmt.Sprintf("Page 3 of %d: visual break. Full-page or near-full-page image related to the story. Minimal text — one short caption or pull quote maximum. No headline repeat.", totalParts)
+			layoutRequired = "dominant full-page image or illustration, single short caption or pull quote, page number"
+		default:
+			seriesNote = fmt.Sprintf("Page %d of %d: continuation. The headline, deck, byline and opening body text already appeared on earlier pages — do not repeat them. Carry the story forward with new body columns, a pull quote drawn from the continuation text, sidebar or closing visual. Use a distinct layout.", part, totalParts)
+			layoutRequired = "body text columns, pull quote or sidebar, closing image or graphic, page number"
+		}
 	}
+
+	content := map[string]any{
+		"title":            a.Title,
+		"brief_body":       bodyText,
+		"series_note":      seriesNote,
+		"modules":          modules,
+		"image_text_notes": articleImageTextNotes(a),
+	}
+	if storyOverview != "" {
+		content["story_overview"] = storyOverview
+	}
+
+	constraints := []string{"full page visible", "no crop", "keep page furniture consistent across issue", "avoid " + style.Avoid}
+	if totalParts > 1 {
+		constraints = append(constraints, fmt.Sprintf("visual style (palette, illustration approach, typography) must be consistent across all %d pages of this article", totalParts))
+		if part > 1 {
+			constraints = append(constraints, "do not repeat the article headline, deck, byline or any body text that appeared on a previous page of this article")
+		}
+	}
+
 	return imagePromptJSON(map[string]any{
 		"task": "Create a print magazine content page.",
 		"metadata": map[string]any{
@@ -2257,17 +2365,11 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, kind),
 		},
-		"content": map[string]any{
-			"title":            a.Title,
-			"brief_body":       compact(a.Body, 800),
-			"series_note":      series,
-			"modules":          modules,
-			"image_text_notes": articleImageTextNotes(a),
-		},
+		"content": content,
 		"layout": map[string]any{
-			"required_elements": "headline, deck, byline/source if available, readable columns, image slots, article-specific image text, pull quote/sidebar where useful",
+			"required_elements": layoutRequired,
 		},
-		"constraints": []string{"full page visible", "no crop", "keep page furniture consistent across issue", "avoid " + style.Avoid},
+		"constraints": constraints,
 	})
 }
 
