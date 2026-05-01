@@ -1241,8 +1241,8 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 	bodyRange := fmt.Sprintf("900-%d", bodyMax)
 	bodySample := compact(a.Body, 3200*pages)
 	maxTokens := maxTokensForCharTarget(bodyMax)
-	if maxTokens < 2000 {
-		maxTokens = 2000
+	if maxTokens < 4000 {
+		maxTokens = 4000
 	}
 	if a.Kind == "podcast" {
 		bodyRange = fmt.Sprintf("1800-%d", max(2800, bodyMax))
@@ -1443,8 +1443,8 @@ func articleBodyMaxChars(style magazineStyle, a article) int {
 }
 
 func (g articleLengthGuidance) withJSONBudget() articleLengthGuidance {
-	if g.MaxTokens < 1200 {
-		g.MaxTokens = 1200
+	if g.MaxTokens < 4000 {
+		g.MaxTokens = 4000
 	}
 	return g
 }
@@ -1464,22 +1464,20 @@ func firstIntRange(raw string) (int, int) {
 
 func maxTokensForCharTarget(chars int) int {
 	switch {
-	case chars <= 500:
-		return 1200
 	case chars <= 800:
-		return 1200
-	case chars <= 1400:
-		return 1400
-	case chars <= 2200:
-		return 1500
+		return 4000
+	case chars <= 1600:
+		return 5000
+	case chars <= 3200:
+		return 6000
 	default:
-		return 1800
+		return 8000
 	}
 }
 
 func (s *server) summarizePodcastForImport(ctx context.Context, a article, style magazineStyle) (article, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Summarize this podcast episode source material into detailed print-editorial notes for a later magazine article rewrite. Preserve concrete facts, people, works, chronology, arguments, opinions, disagreements, examples, recommendations and useful chapter structure. Prefer substance over polish. Do not mention transcripts, timestamps, RSS, show notes or source mechanics. Title should be a concise episode/article title. Body should be 2600-4200 characters, factual and balanced, not finished prose.\n\nSTYLE CONTEXT: %s\n\nEPISODE TITLE: %s\nSOURCE MATERIAL SAMPLE:\n%s", styleLine(style, "article"), a.Title, sampleLongText(a.Body, 18000))
-	text, err := s.runDefapiText(ctx, prompt, 2200)
+	text, err := s.runDefapiText(ctx, prompt, 4000)
 	if err != nil {
 		return a, err
 	}
@@ -1525,7 +1523,7 @@ func (s *server) rewriteFeatureForStyle(ctx context.Context, a article, style ma
 
 func (s *server) generateArticles(ctx context.Context, title string, style magazineStyle, count int) ([]article, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of exactly %d objects. Each object must have title and body. Generate original fictional-but-plausible magazine articles that fit this publication. Do not use real copyrighted brands unless generic/current facts are unavoidable. Vary article types: one feature, one short news item, one practical/service piece, one opinion/interview/list if count allows. Body length 900-1500 characters each, ready for print layout.\n\nPUBLICATION: %s\nSTYLE: %s", count, emptyDefault(title, "Untitled Magazine"), styleLine(style, "article"))
-	text, err := s.runDefapiText(ctx, prompt, 2200)
+	text, err := s.runDefapiText(ctx, prompt, 4000)
 	if err != nil {
 		return nil, err
 	}
@@ -1547,7 +1545,7 @@ func (s *server) generateArticles(ctx context.Context, title string, style magaz
 
 func (s *server) generateCoverPlan(ctx context.Context, title string, style magazineStyle, pages []pagePlan, issue issueContext) (coverPlan, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON with keys language, mainStoryTitle, lines. The lines value must be an array of 4-7 objects with keys page, title, label and role. Choose the strongest cover lines from the final page order. Identify exactly one main story using mainStoryTitle and role=\"main\" on that line. Translate page labels into the publication language; do not use English-only shorthand like p2 unless that is natural for the language. Use the final page numbers exactly as supplied. Use this exact issue context if issue metadata appears: %s. Do not invent a different issue number, year or date. Avoid adverts unless the issue has too few editorial pages.\n\nPUBLICATION: %s\nLANGUAGE: %s\nSTYLE: %s\nFINAL PAGES:\n%s", issueContextLine(issue), emptyDefault(title, style.Name), emptyDefault(style.Language, "English"), styleLine(style, "cover"), pageListForCover(pages))
-	text, err := s.runDefapiText(ctx, prompt, 900)
+	text, err := s.runDefapiText(ctx, prompt, 4000)
 	if err != nil {
 		return coverPlan{}, err
 	}
