@@ -38,7 +38,7 @@ echo "Installed: $INSTALL_DIR/$BINARY"
 
 echo ""
 echo "Installing defapi-cli..."
-curl -fsSL https://raw.githubusercontent.com/jhgundersen/defapi-cli/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jhgundersen/defapi-cli/master/install.sh | PREFIX="${PREFIX:-$HOME/.local}" sh
 
 echo ""
 echo "Done. Make sure $INSTALL_DIR is in your PATH."
