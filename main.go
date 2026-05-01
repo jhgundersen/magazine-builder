@@ -37,6 +37,10 @@ const (
 	binaryName     = "magazine-builder"
 )
 
+// version is set at build time via -ldflags "-X main.version=vX.Y.Z".
+// It defaults to "dev" which disables self-update.
+var version = "dev"
+
 //go:embed static/*
 var embeddedStatic embed.FS
 
@@ -421,11 +425,21 @@ type podcastValue struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "update" {
-		if err := runUpdate(os.Args[2:]); err != nil {
-			log.Fatal(err)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version":
+			fmt.Printf("%s %s\n", binaryName, version)
+			return
+		case "update":
+			if version == "dev" {
+				fmt.Fprintln(os.Stderr, "update: not available in dev builds")
+				os.Exit(1)
+			}
+			if err := runUpdate(os.Args[2:]); err != nil {
+				log.Fatal(err)
+			}
+			return
 		}
-		return
 	}
 	cfg := parseFlags()
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
@@ -435,11 +449,14 @@ func main() {
 	if cfg.WorkspaceMaxAge > 0 {
 		go s.cleanupLoop()
 	}
+	if version != "dev" {
+		go s.autoUpdateLoop()
+	}
 	handler, err := s.routes()
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("magazine-builder listening on http://localhost%s", cfg.Addr)
+	log.Printf("magazine-builder %s listening on http://localhost%s", version, cfg.Addr)
 	log.Fatal(http.ListenAndServe(cfg.Addr, handler))
 }
 
@@ -528,12 +545,16 @@ func runUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
+	if tag == version {
+		fmt.Printf("Already up to date (%s)\n", version)
+		return nil
+	}
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", opts.Repo, tag, asset)
-	fmt.Printf("Updating %s to %s...\n", target, tag)
+	fmt.Printf("Updating %s → %s...\n", version, tag)
 	if err := downloadAndReplace(ctx, url, target); err != nil {
 		return err
 	}
-	fmt.Printf("Updated: %s\n", target)
+	fmt.Printf("Updated to %s — restart to apply\n", tag)
 	return nil
 }
 
@@ -1115,6 +1136,20 @@ func (s *server) cleanupLoop() {
 	for {
 		s.cleanupWorkspaces()
 		time.Sleep(time.Hour)
+	}
+}
+
+func (s *server) autoUpdateLoop() {
+	// Wait a bit on startup before the first check.
+	time.Sleep(5 * time.Minute)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		tag, err := latestReleaseTag(ctx, repositoryName)
+		cancel()
+		if err == nil && tag != "" && tag != version {
+			log.Printf("auto-update: new version available: %s (running %s) — run 'magazine-builder update' to upgrade", tag, version)
+		}
+		time.Sleep(24 * time.Hour)
 	}
 }
 

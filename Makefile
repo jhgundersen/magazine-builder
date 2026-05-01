@@ -3,6 +3,8 @@ ADDR ?= :8080
 PREFIX ?= $(HOME)/.local
 BINARY ?= magazine-builder
 BUILD_DIR ?= bin
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS = -ldflags "-X main.version=$(VERSION)"
 
 .PHONY: fmt test check build run install
 
@@ -18,11 +20,11 @@ check: test
 
 build:
 	mkdir -p $(BUILD_DIR)
-	env GOCACHE=$(GOCACHE) go build -o $(BUILD_DIR)/$(BINARY) .
+	env GOCACHE=$(GOCACHE) go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) .
 
 run:
 	env GOCACHE=$(GOCACHE) go run . -addr $(ADDR)
 
 install: build
 	mkdir -p $(PREFIX)/bin
-	env GOCACHE=$(GOCACHE) go build -o $(PREFIX)/bin/$(BINARY) .
+	env GOCACHE=$(GOCACHE) go build $(LDFLAGS) -o $(PREFIX)/bin/$(BINARY) .
