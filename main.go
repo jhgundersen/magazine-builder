@@ -76,6 +76,7 @@ type progressStatus struct {
 type apiKeyContextKey struct{}
 type textModelContextKey struct{}
 type imageModelContextKey struct{}
+type workspaceContextKey struct{}
 
 type styleRequest struct {
 	Style  string `json:"style"`
@@ -253,21 +254,30 @@ func randomHex(n int) string {
 }
 
 type magazineStyle struct {
-	Name       string `json:"name"`
-	Language   string `json:"language"`
-	Tone       string `json:"tone"`
-	Core       string `json:"core"`
-	Cover      string `json:"cover"`
-	Content    string `json:"content"`
-	Feature    string `json:"feature"`
-	Short      string `json:"short"`
-	Advert     string `json:"advert"`
-	Filler     string `json:"filler"`
-	Back       string `json:"back"`
-	Typography string `json:"typography"`
-	Color      string `json:"color"`
-	Print      string `json:"print"`
-	Avoid      string `json:"avoid"`
+	Name          string `json:"name"`
+	Language      string `json:"language"`
+	Tone          string `json:"tone"`
+	Core          string `json:"core"`
+	Cover         string `json:"cover"`
+	Content       string `json:"content"`
+	Feature       string `json:"feature"`
+	Short         string `json:"short"`
+	Advert        string `json:"advert"`
+	Filler        string `json:"filler"`
+	Back          string `json:"back"`
+	ArticleLength string `json:"articleLength"`
+	Typography    string `json:"typography"`
+	Color         string `json:"color"`
+	Print         string `json:"print"`
+	Avoid         string `json:"avoid"`
+}
+
+type styleBrief struct {
+	Language      string `json:"language"`
+	Format        string `json:"format"`
+	Tone          string `json:"tone"`
+	ArticleLength string `json:"articleLength"`
+	Notes         string `json:"notes"`
 }
 
 type creativeKit struct {
@@ -686,6 +696,7 @@ func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx = contextWithWorkspace(ctx, workspace)
 	referencePath := strings.TrimSpace(r.FormValue("reference"))
 	if referencePath != "" && defapiImageRef(referencePath) == "" {
 		writeError(w, http.StatusBadRequest, errors.New("reference must be a public http(s) image URL"))
@@ -728,6 +739,7 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx = contextWithWorkspace(ctx, workspace)
 	s.workspaceLog(workspace, "rss-import: start url=%q offset=%d limit=%d", req.URL, req.Offset, req.Limit)
 	articles, err := fetchRSS(ctx, req.URL, req.Offset, req.Limit)
 	if err != nil {
@@ -800,6 +812,7 @@ func (s *server) handleGenerateArticles(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx = contextWithWorkspace(ctx, workspace)
 	style := parseStyle(req.Style)
 	articles, err := s.generateArticles(ctx, req.Title, style, req.Count)
 	if err != nil {
@@ -828,6 +841,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx = contextWithWorkspace(ctx, workspace)
 	total := 3
 	for _, a := range req.Articles {
 		if !a.Enhanced {
@@ -864,7 +878,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if req.Articles[i].Kind == "feature" {
 			improved, err = s.rewriteFeatureForStyle(ctx, req.Articles[i], style)
 		} else {
-			improved, err = s.rewriteArticleForStyle(ctx, req.Articles[i], style)
+			improved, err = s.rewriteManualArticleForStyle(ctx, req.Articles[i], style)
 		}
 		if err != nil {
 			log.Printf("defapi text manual article rewrite failed for %q: %v", req.Articles[i].Title, err)
@@ -930,6 +944,7 @@ func (s *server) handleCoverPlan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	ctx = contextWithWorkspace(ctx, workspace)
 	s.workspaceLog(workspace, "cover-plan: start pages=%d", len(req.Pages))
 	issue := normalizeIssueContext(req.Issue, time.Now())
 	plan, err := s.generateCoverPlan(ctx, req.Title, req.Style, req.Pages, issue)
@@ -1111,19 +1126,28 @@ func newWorkspaceID(title string) string {
 }
 
 func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath string) (magazineStyle, error) {
-	prompt := "Return only valid compact JSON for a reusable magazine/newspaper/comic style. No markdown. Keep each field under 260 characters so later image prompts stay under 4000 chars. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, typography, color, print, avoid. The name field must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". The language field must be the publication language inferred from the user style/title, such as English, Norwegian Bokmal, French, etc. The tone field must describe the text voice for article rewrites and generated page furniture. If the user asks for a comic, satire, parody, hysterical/adult humor, tabloid, puzzle, or other strong format, do not flatten it into a normal respectable magazine. Put explicit structural instructions into content, feature, short, filler and back: panels, cartoons, image text, recurring gags, fake departments, absurd infographics, pull-quotes, punchlines, and visual comedy. Adult comic means aimed at grown-ups, not explicit or vulgar unless the user asks. Define guidance for cover, normal content pages, feature articles, short articles, adverts, filler/departments and back page. Include consistent header, footer, folio and grid guidance in content/core rather than a separate template page.\n\nUser style:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
+	brief, err := s.generateStyleBrief(ctx, title, style)
+	if err != nil {
+		return magazineStyle{}, err
+	}
+	prompt := "Return only valid compact JSON. No markdown, no prose. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, articleLength, typography, color, print, avoid. Keep every value under 220 characters. name must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". Use this compact brief as the source of truth. Preserve strong formats such as comics, satire, tabloids, puzzles or parody; do not normalize them into a generic magazine. Make articleLength practical for article rewrite prompts.\n\nBRIEF JSON:\n" + compactJSON(brief)
 	if referencePath != "" {
-		prompt += "\n\nReference image URL: " + referencePath + "\nUse this URL as visual inspiration for palette, typography mood, texture and layout feeling, but describe the reusable style in words."
+		prompt += "\n\nReference image URL: " + referencePath + "\nUse it only as visual inspiration for palette, typography mood, texture and layout feeling."
 	}
-	text, err := s.runDefapiText(ctx, prompt, 1200)
-	if err != nil {
+	var parsed magazineStyle
+	if err := s.runDefapiTextJSON(ctx, prompt, 6000, &parsed); err != nil {
 		return magazineStyle{}, err
 	}
-	parsed, err := decodeStyle(text)
-	if err != nil {
-		return magazineStyle{}, err
+	return normalizeStyle(parsed), nil
+}
+
+func (s *server) generateStyleBrief(ctx context.Context, title, style string) (styleBrief, error) {
+	prompt := "Return only valid compact JSON. No markdown, no prose. Required keys: language, format, tone, articleLength, notes. Infer the intended publication format from the user's style request. articleLength must include a character range and structure note, such as '220-650 chars; short comic panel beats' or '1200-2200 chars; essay paragraphs'. Keep each value under 180 characters.\n\nPUBLICATION NAME: " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + "\nUSER STYLE:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
+	var brief styleBrief
+	if err := s.runDefapiTextJSON(ctx, prompt, 3000, &brief); err != nil {
+		return styleBrief{}, err
 	}
-	return parsed, nil
+	return brief, nil
 }
 
 func (s *server) generateIssueContext(ctx context.Context, req buildRequest, style magazineStyle) (issueContext, error) {
@@ -1214,16 +1238,16 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 		bodySample = sampleLongText(a.Body, 6500)
 		maxTokens = 1600
 	}
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Rewrite this imported source into print-ready magazine copy matching the publication concept, style and text tone. If the publication is comic-led, satirical, tabloid, puzzle-like, literary, technical, or otherwise strongly formatted, make the copy sound and structure fit that format. Keep facts, names, chronology, arguments, concrete examples and useful nuance. Remove web/navigation language, links, embeds, YouTube mentions, newsletter prompts, transcript mechanics and SEO clutter. Title should fit the publication voice. Body should be %s characters, in coherent paragraphs or short page-ready chunks as the style demands.\n\nSTYLE AND TONE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s", bodyRange, styleLine(style, "article"), a.Title, bodySample)
-	text, err := s.runDefapiText(ctx, prompt, maxTokens)
-	if err != nil {
-		return a, err
+	lengthNote := strings.TrimSpace(style.ArticleLength)
+	if lengthNote == "" {
+		lengthNote = "Use coherent paragraphs or short page-ready chunks as the style demands."
 	}
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Rewrite this imported source into print-ready magazine copy matching the publication concept, style and text tone. If the publication is comic-led, satirical, tabloid, puzzle-like, literary, technical, or otherwise strongly formatted, make the copy sound and structure fit that format. Keep facts, names, chronology, arguments, concrete examples and useful nuance. Remove web/navigation language, links, embeds, YouTube mentions, newsletter prompts, transcript mechanics and SEO clutter. Title should fit the publication voice. Body length and structure should match this style guidance: %s. Body should be %s characters unless the guidance clearly requires a shorter visual format.\n\nSTYLE AND TONE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s", lengthNote, bodyRange, styleLine(style, "article"), a.Title, bodySample)
 	var out struct {
 		Title string `json:"title"`
 		Body  string `json:"body"`
 	}
-	if err := json.Unmarshal([]byte(extractJSONObject(text)), &out); err != nil {
+	if err := s.runDefapiTextJSON(ctx, prompt, maxTokens, &out); err != nil {
 		return a, err
 	}
 	if strings.TrimSpace(out.Title) != "" {
@@ -1234,6 +1258,146 @@ func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style ma
 	}
 	a.Enhanced = true
 	return a, nil
+}
+
+func (s *server) rewriteManualArticleForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
+	bodySample := compact(a.Body, 3200)
+	length := manualArticleLengthForStyle(style, a)
+	maxTokens := length.MaxTokens
+	if len([]rune(a.Body)) < 700 {
+		length = length.shorter()
+		maxTokens = length.MaxTokens
+	}
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Turn this manually entered rough or partial article material into finished print-ready magazine copy. Make the title and body strongly match the publication concept, style and text tone; the body should be at least as transformed as the title. Do not merely clean up the source. Develop fragments, notes and plain prose into a coherent article in the magazine's voice, structure and rhythm. If the publication is comic-led, satirical, tabloid, puzzle-like, literary, technical, nostalgic, niche, or otherwise strongly formatted, make the body unmistakably fit that format. Preserve the user's concrete intent, facts, names and constraints, but you may add plausible connective tissue, framing, transitions, departments, jokes, asides, service boxes or editorial texture when the input is thin. Length and structure must match the magazine format: %s Body should be %s characters.\n\nSTYLE AND TONE: %s\n\nUSER TITLE OR TOPIC: %s\nUSER ROUGH MATERIAL: %s", length.Guidance, length.Range, styleLine(style, "article"), a.Title, bodySample)
+	var out struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := s.runDefapiTextJSON(ctx, prompt, maxTokens, &out); err != nil {
+		return a, err
+	}
+	if strings.TrimSpace(out.Title) != "" {
+		a.Title = cleanText(out.Title)
+	}
+	if strings.TrimSpace(out.Body) != "" {
+		a.Body = cleanText(out.Body)
+	}
+	a.Enhanced = true
+	return a, nil
+}
+
+type articleLengthGuidance struct {
+	Range     string
+	Guidance  string
+	MaxTokens int
+}
+
+func (g articleLengthGuidance) shorter() articleLengthGuidance {
+	switch g.Range {
+	case "220-650":
+		g.Range = "160-420"
+		g.Guidance += " The user supplied very little material, so keep it especially compact."
+		g.MaxTokens = 1200
+	case "450-900":
+		g.Range = "320-700"
+		g.MaxTokens = 1200
+	case "700-1300":
+		g.Range = "550-1000"
+		g.MaxTokens = 1200
+	default:
+		g.Range = "750-1300"
+		g.MaxTokens = 1200
+	}
+	return g
+}
+
+func manualArticleLengthForStyle(style magazineStyle, a article) articleLengthGuidance {
+	if strings.TrimSpace(style.ArticleLength) != "" {
+		return articleLengthGuidanceFromStyle(style.ArticleLength).withJSONBudget()
+	}
+	text := strings.ToLower(strings.Join([]string{
+		style.Name,
+		style.Tone,
+		style.Core,
+		style.Content,
+		style.Feature,
+		style.Short,
+		style.Typography,
+	}, " "))
+	if strings.Contains(text, "comic") || strings.Contains(text, "cartoon") || strings.Contains(text, "panel") || strings.Contains(text, "manga") || strings.Contains(text, "tegneserie") {
+		return articleLengthGuidance{
+			Range:     "220-650",
+			Guidance:  "Use short balloons, captions, panel beats, labels, or gag fragments rather than long prose.",
+			MaxTokens: 1200,
+		}.withJSONBudget()
+	}
+	if strings.Contains(text, "tabloid") || strings.Contains(text, "satire") || strings.Contains(text, "parody") || strings.Contains(text, "humor") || strings.Contains(text, "puzzle") || strings.Contains(text, "quiz") {
+		return articleLengthGuidance{
+			Range:     "450-900",
+			Guidance:  "Use punchy short sections, headlines, boxes, jokes, prompts, or quick-hit copy rather than a long essay.",
+			MaxTokens: 1200,
+		}.withJSONBudget()
+	}
+	if strings.Contains(text, "literary") || strings.Contains(text, "longform") || strings.Contains(text, "essay") || strings.Contains(text, "feature") || strings.Contains(text, "technical") || strings.Contains(text, "analysis") {
+		return articleLengthGuidance{
+			Range:     "1200-2200",
+			Guidance:  "Use a fuller article structure with paragraphs, detail, transitions and a developed editorial arc.",
+			MaxTokens: 1500,
+		}.withJSONBudget()
+	}
+	return articleLengthGuidance{
+		Range:     "700-1300",
+		Guidance:  "Use a normal magazine article length with concise paragraphs and enough texture to feel finished.",
+		MaxTokens: 1200,
+	}.withJSONBudget()
+}
+
+func articleLengthGuidanceFromStyle(raw string) articleLengthGuidance {
+	raw = compact(raw, 220)
+	min, max := firstIntRange(raw)
+	if min <= 0 || max <= 0 {
+		min, max = 700, 1300
+	}
+	return articleLengthGuidance{
+		Range:     fmt.Sprintf("%d-%d", min, max),
+		Guidance:  raw,
+		MaxTokens: maxTokensForCharTarget(max),
+	}
+}
+
+func (g articleLengthGuidance) withJSONBudget() articleLengthGuidance {
+	if g.MaxTokens < 1200 {
+		g.MaxTokens = 1200
+	}
+	return g
+}
+
+func firstIntRange(raw string) (int, int) {
+	m := regexp.MustCompile(`(\d{2,5})\D+(\d{2,5})`).FindStringSubmatch(raw)
+	if len(m) != 3 {
+		return 0, 0
+	}
+	min, _ := strconv.Atoi(m[1])
+	max, _ := strconv.Atoi(m[2])
+	if min > max {
+		min, max = max, min
+	}
+	return min, max
+}
+
+func maxTokensForCharTarget(chars int) int {
+	switch {
+	case chars <= 500:
+		return 1200
+	case chars <= 800:
+		return 1200
+	case chars <= 1400:
+		return 1400
+	case chars <= 2200:
+		return 1500
+	default:
+		return 1800
+	}
 }
 
 func (s *server) summarizePodcastForImport(ctx context.Context, a article, style magazineStyle) (article, error) {
@@ -1469,7 +1633,7 @@ func fallbackCoverPlan(style magazineStyle, pages []pagePlan) coverPlan {
 func (s *server) runDefapiText(ctx context.Context, prompt string, maxTokens int) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.DefapiTextTimeout)
 	defer cancel()
-	args := commandArgs(s.cfg.DefapiTextCategory, textModelFromContext(ctx, s.cfg.DefapiTextModel), "-max-tokens", strconv.Itoa(maxTokens), prompt)
+	args := commandArgs(s.cfg.DefapiTextCategory, textModelFromContext(ctx, s.cfg.DefapiTextModel), "--stream=false", "-max-tokens", strconv.Itoa(maxTokens), prompt)
 	cmd := exec.CommandContext(cctx, s.cfg.DefapiTextCmd, args...)
 	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -1486,6 +1650,39 @@ func (s *server) runDefapiText(ctx context.Context, prompt string, maxTokens int
 		return "", err
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+func (s *server) runDefapiTextJSON(ctx context.Context, prompt string, maxTokens int, out any) error {
+	var lastErr error
+	current := prompt
+	workspace, _ := ctx.Value(workspaceContextKey{}).(string)
+	for attempt := 0; attempt < 2; attempt++ {
+		attemptTokens := maxTokens
+		if attempt > 0 {
+			attemptTokens = max(maxTokens*2, 4000)
+			if attemptTokens > 12000 {
+				attemptTokens = 12000
+			}
+		}
+		text, err := s.runDefapiText(ctx, current, attemptTokens)
+		if err != nil {
+			lastErr = err
+			s.workspaceLog(workspace, "defapi text-json: attempt=%d max_tokens=%d error=%v", attempt+1, attemptTokens, err)
+		} else if strings.TrimSpace(text) == "" {
+			lastErr = errors.New("empty defapi text response")
+			s.workspaceLog(workspace, "defapi text-json: attempt=%d max_tokens=%d empty response", attempt+1, attemptTokens)
+		} else if err := json.Unmarshal([]byte(extractJSONObject(text)), out); err != nil {
+			lastErr = fmt.Errorf("%w: response=%q", err, compact(text, 500))
+			s.workspaceLog(workspace, "defapi text-json: attempt=%d max_tokens=%d invalid json error=%v raw_output:\n%s", attempt+1, attemptTokens, err, compact(text, 4000))
+		} else {
+			if attempt > 0 {
+				s.workspaceLog(workspace, "defapi text-json: attempt=%d max_tokens=%d recovered with valid JSON", attempt+1, attemptTokens)
+			}
+			return nil
+		}
+		current = prompt + "\n\nYour previous response was not valid JSON. Return only one valid compact JSON object. No markdown, no prose, no code fence."
+	}
+	return lastErr
 }
 
 func (s *server) runDefapiImageWithRetry(ctx context.Context, workspace string, pageNumber int, prompt string, images []string) (generatedImage, error) {
@@ -2241,23 +2438,41 @@ func fallbackStyle(style, referencePath string) magazineStyle {
 	if referencePath != "" {
 		base += ". Use the reference image URL as visual inspiration for palette, texture, typography mood, and image treatment."
 	}
-	return magazineStyle{
-		Name:       "Custom magazine",
-		Language:   "English",
-		Tone:       "clear, magazine-like, factual and polished",
-		Core:       compact(base, 210),
-		Cover:      "large masthead, confident cover lines, one dominant image, date/price/barcode if fitting",
-		Content:    "consistent grid, clear folios, restrained page furniture, modular image and text rhythm",
-		Feature:    "more generous opening image, pull quote, sidebar, longer headline and stronger hierarchy",
-		Short:      "compact brief layout, small image, dense but readable columns, one small sidebar",
-		Advert:     "fictional full-page advert using the same print world, distinct from editorial pages",
-		Filler:     "departments, briefs, charts, reader notes, small classifieds and recurring modules",
-		Back:       "closing advert, subscription panel, teaser or striking single visual",
-		Typography: "strong masthead, readable serif or humanist body, compact image notes and section labels",
-		Color:      "limited coherent palette with one warm and one cool accent",
-		Print:      "tactile paper, realistic print texture, subtle scan/photo imperfections",
-		Avoid:      "generic web UI, floating app cards, unreadable logo, mismatched styles, real brands unless provided",
+	out := magazineStyle{
+		Name:          "Custom magazine",
+		Language:      "English",
+		Tone:          "clear, magazine-like, factual and polished",
+		Core:          compact(base, 210),
+		Cover:         "large masthead, confident cover lines, one dominant image, date/price/barcode if fitting",
+		Content:       "consistent grid, clear folios, restrained page furniture, modular image and text rhythm",
+		Feature:       "more generous opening image, pull quote, sidebar, longer headline and stronger hierarchy",
+		Short:         "compact brief layout, small image, dense but readable columns, one small sidebar",
+		Advert:        "fictional full-page advert using the same print world, distinct from editorial pages",
+		Filler:        "departments, briefs, charts, reader notes, small classifieds and recurring modules",
+		Back:          "closing advert, subscription panel, teaser or striking single visual",
+		ArticleLength: "700-1300 chars; concise magazine paragraphs with enough editorial texture to feel finished",
+		Typography:    "strong masthead, readable serif or humanist body, compact image notes and section labels",
+		Color:         "limited coherent palette with one warm and one cool accent",
+		Print:         "tactile paper, realistic print texture, subtle scan/photo imperfections",
+		Avoid:         "generic web UI, floating app cards, unreadable logo, mismatched styles, real brands unless provided",
 	}
+	lower := strings.ToLower(base)
+	if strings.Contains(lower, "tegneserie") || strings.Contains(lower, "norsk") || strings.Contains(lower, "guttetur") || strings.Contains(lower, "skogen") {
+		out.Language = "Norwegian Bokmal"
+	}
+	if strings.Contains(lower, "tegneserie") || strings.Contains(lower, "pyton") || strings.Contains(lower, "mad") || strings.Contains(lower, "comic") || strings.Contains(lower, "cartoon") {
+		out.Tone = "hysterisk, voksen tegneseriehumor med skarp timing og tydelige punchlines"
+		out.Content = "tegneseriesider med paneler, snakkebobler, korte tekstblokker, visuelle gags og gjentagende figurer"
+		out.Feature = "helside med mange paneler, store punchlines, absurde detaljer, små sidegags og tydelig tegneserieramme"
+		out.Short = "kort tegneseriebeat med snakkebobler, lydeffekter, image text og rask punchline"
+		out.Filler = "vitser, falske annonser, leserbrev, absurde faktabokser, quiz og små tegneseriestriper"
+		out.Back = "baksidegag, falsk annonse, teaser eller stor avsluttende tegneserierute"
+		out.ArticleLength = "220-650 chars; short panel beats, speech balloons, gag fragments and comic text instead of long prose"
+		out.Typography = "bold comic masthead, hand-lettered accents, readable compact body, loud section labels"
+		out.Color = "high-contrast comic palette with warm paper, harsh black ink and one loud accent color"
+		out.Avoid = "generic web UI, respectable corporate magazine tone, long essay prose, unreadable logo, real brands unless provided"
+	}
+	return out
 }
 
 func fallbackCreativeKit(req buildRequest) creativeKit {
@@ -2286,6 +2501,10 @@ func decodeStyle(text string) (magazineStyle, error) {
 	if err := json.Unmarshal([]byte(extractJSONObject(text)), &style); err != nil {
 		return style, err
 	}
+	return normalizeStyle(style), nil
+}
+
+func normalizeStyle(style magazineStyle) magazineStyle {
 	fallback := fallbackStyle("", "")
 	if style.Name == "" {
 		style.Name = fallback.Name
@@ -2320,6 +2539,9 @@ func decodeStyle(text string) (magazineStyle, error) {
 	if style.Back == "" {
 		style.Back = fallback.Back
 	}
+	if style.ArticleLength == "" {
+		style.ArticleLength = fallback.ArticleLength
+	}
 	if style.Typography == "" {
 		style.Typography = fallback.Typography
 	}
@@ -2332,7 +2554,7 @@ func decodeStyle(text string) (magazineStyle, error) {
 	if style.Avoid == "" {
 		style.Avoid = fallback.Avoid
 	}
-	return style, nil
+	return style
 }
 
 func decodeCreativeKit(text string) (creativeKit, error) {
@@ -2358,10 +2580,46 @@ func decodeCreativeKit(text string) (creativeKit, error) {
 
 func extractJSONObject(text string) string {
 	text = strings.TrimSpace(text)
-	start := strings.IndexByte(text, '{')
-	end := strings.LastIndexByte(text, '}')
-	if start >= 0 && end > start {
-		return text[start : end+1]
+	best := ""
+	start := -1
+	depth := 0
+	inString := false
+	escaped := false
+	for i, r := range text {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			if r == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch r {
+		case '"':
+			inString = true
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					best = text[start : i+1]
+					start = -1
+				}
+			}
+		}
+	}
+	if best != "" {
+		return best
 	}
 	return text
 }
@@ -2750,6 +3008,14 @@ func contextWithModels(ctx context.Context, textModel, imageModel string) contex
 		ctx = context.WithValue(ctx, imageModelContextKey{}, imageModel)
 	}
 	return ctx
+}
+
+func contextWithWorkspace(ctx context.Context, workspace string) context.Context {
+	workspace = sanitizeWorkspace(workspace)
+	if workspace == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, workspaceContextKey{}, workspace)
 }
 
 func textModelFromContext(ctx context.Context, fallback string) string {

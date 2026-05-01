@@ -1279,7 +1279,48 @@ function brandAssetsForRender(page) {
 function brandAssetPrompt(page) {
   if (!lastPlan || page.kind === "advert") return "";
   if (!brandAssetsForRender(page).length) return "";
-  return "A supplied brand asset board contains usable masthead, wordmark, issue seal, divider and folio marks. Use only the actual marks from it for cover identity and recurring page furniture when appropriate. Do not reproduce the whole board, its background, spacing, or any non-brand explanatory text.";
+  const use = brandAssetUseForPage(page);
+  return (
+    "A supplied brand asset board contains masthead, wordmark, issue seal, divider and folio marks. For this page, use at most one element from the board: " +
+    use.element +
+    ". Purpose: " +
+    use.purpose +
+    ". Do not use the other board elements on this page. Do not reproduce the whole board, its background, spacing, labels, or any non-brand explanatory text."
+  );
+}
+function brandAssetUseForPage(page) {
+  const kind = page.kind || "article";
+  if (kind === "cover") {
+    return {
+      element: "the large masthead only",
+      purpose: "main cover identity",
+    };
+  }
+  if (kind === "back-page") {
+    return {
+      element: "the issue seal or small folio mark only",
+      purpose: "small closing-page furniture",
+    };
+  }
+  if (kind === "feature") {
+    return {
+      element: "the small horizontal wordmark only",
+      purpose: "running header identity",
+    };
+  }
+  if (kind === "filler") {
+    return {
+      element: "the divider or rule motif only",
+      purpose: "department-page structure",
+    };
+  }
+  return {
+    element:
+      page.number % 2 === 0
+        ? "the small folio mark only"
+        : "the small horizontal wordmark only",
+    purpose: "subtle recurring page furniture",
+  };
 }
 function fitPromptJSON(prompt) {
   let out = JSON.stringify(prompt);
