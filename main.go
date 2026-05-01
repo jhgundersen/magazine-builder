@@ -1874,9 +1874,18 @@ func (s *server) pagePromptWithFurniture(ctx context.Context, style magazineStyl
 	if strings.EqualFold(page.Kind, "cover") {
 		return page.Prompt
 	}
-	copy, err := s.generatePageFurniture(ctx, style, page, issue)
+	workspace, _ := ctx.Value(workspaceContextKey{}).(string)
+	var copy pageFurniture
+	var err error
+	for attempt := range 3 {
+		copy, err = s.generatePageFurniture(ctx, style, page, issue)
+		if err == nil {
+			break
+		}
+		s.workspaceLog(workspace, "furniture: page=%d attempt=%d failed: %v", page.Number, attempt+1, err)
+	}
 	if err != nil {
-		log.Printf("defapi text page furniture failed for page %d: %v", page.Number, err)
+		s.workspaceLog(workspace, "furniture: page=%d all attempts failed, using fallback", page.Number)
 		copy = fallbackPageFurniture(style, page)
 	}
 	side := pageSide(page.Number)
