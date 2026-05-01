@@ -1,7 +1,7 @@
 let articles = [];
 let lastPlan = null;
 let referencePath = "";
-let workspace = "";
+let workspace = workspaceFromURL();
 let apiKey = localStorage.getItem("defapiApiKey") || "";
 let textModel = localStorage.getItem("defapiTextModel") || "claude";
 let imageModel = localStorage.getItem("defapiImageModel") || "gpt2";
@@ -15,6 +15,32 @@ let renderCallTotal = 0;
 let renderCallDone = 0;
 let originalStylePrompt = "";
 const $ = (id) => document.getElementById(id);
+function workspaceFromURL() {
+  return new URLSearchParams(window.location.search).get("workspace") || "";
+}
+function updateURLWorkspace(ws) {
+  const url = new URL(window.location.href);
+  if (ws) {
+    url.searchParams.set("workspace", ws);
+  } else {
+    url.searchParams.delete("workspace");
+  }
+  history.pushState({ workspace: ws }, "", url.toString());
+}
+async function saveState(key, value) {
+  if (!workspace) return;
+  await fetch("/api/workspace-state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace, key, value: JSON.stringify(value) }),
+  }).catch(() => {});
+}
+let saveArticlesTimer = null;
+function scheduleSaveArticles() {
+  if (!workspace) return;
+  clearTimeout(saveArticlesTimer);
+  saveArticlesTimer = setTimeout(() => saveState("articles", articles), 1000);
+}
 function esc(s) {
   return String(s).replace(
     /[&<>"']/g,
@@ -91,6 +117,7 @@ function initModelSelectors() {
     };
 }
 function updateWorkspaceLabel() {
+  updateURLWorkspace(workspace);
   const el = $("workspaceLabel");
   if (el)
     el.innerHTML = workspace
@@ -100,8 +127,10 @@ function updateWorkspaceLabel() {
         esc(workspace) +
         '/magazine.log" target="_blank">log</a>'
       : "No workspace yet";
+  const inp = $("workspaceInput");
+  if (inp && workspace && !inp.value) inp.placeholder = workspace;
 }
-function showStep(n) {
+function showStep(n, skipSave) {
   updateWorkspaceLabel();
   currentStep = n;
   const pt = $("planToolbar");
@@ -120,6 +149,7 @@ function showStep(n) {
     ["wizardPdf", 4],
   ].forEach(([id, step]) => $(id).classList.toggle("active", step === n));
   if (n >= 3 && lastPlan) renderPlan(lastPlan);
+  if (!skipSave) saveState("step", n);
 }
 async function ensureStyle() {
   if (!requireApiKey()) return false;
@@ -138,19 +168,42 @@ async function enhanceStyle() {
   fd.append("reference", $("reference").value.trim());
   fd.append("textModel", textModel);
   const res = await fetch("/api/enhance-style", { method: "POST", body: fd });
-  const data = await res.json();
+  const init = await res.json();
   if (!res.ok) {
-    $("styleStatus").textContent = data.error || "Failed";
+    $("styleStatus").textContent = init.error || "Failed";
     return false;
   }
-  $("style").value = data.enhancedStyle;
-  referencePath = data.referencePath || referencePath;
-  workspace = data.workspace || workspace;
+  workspace = init.workspace || workspace;
   updateWorkspaceLabel();
-  $("styleStatus").textContent = referencePath
-    ? "Enhanced with reference image."
-    : "Enhanced.";
-  return true;
+  $("styleStatus").textContent = "Enhancing style...";
+  return new Promise((resolve) => {
+    startTaskPolling(workspace, init.taskId, null, (t) => {
+      if (t.status === "failed") {
+        $("styleStatus").textContent = t.error || "Style enhancement failed";
+        resolve(false);
+        return;
+      }
+      try {
+        const data = JSON.parse(t.outputJson);
+        $("style").value = data.enhancedStyle;
+        referencePath = data.referencePath || referencePath;
+        workspace = data.workspace || workspace;
+        updateWorkspaceLabel();
+        saveState("style", {
+          prompt: originalStylePrompt,
+          enhancedJson: data.enhancedStyle,
+          referencePath,
+        });
+        $("styleStatus").textContent = referencePath
+          ? "Enhanced with reference image."
+          : "Enhanced.";
+        resolve(true);
+      } catch (_) {
+        $("styleStatus").textContent = "Could not parse style result.";
+        resolve(false);
+      }
+    });
+  });
 }
 function renderArticles() {
   const wrap = $("articles");
@@ -205,8 +258,8 @@ function renderArticles() {
       articles[i].enhanced = false;
       if (k === "kind") renderArticles();
     };
-    el.oninput = update;
-    el.onchange = update;
+    el.oninput = (e) => { update(e); scheduleSaveArticles(); };
+    el.onchange = (e) => { update(e); scheduleSaveArticles(); };
   });
   wrap.querySelectorAll("[data-remove]").forEach(
     (el) =>
@@ -214,6 +267,7 @@ function renderArticles() {
         if (isRendering) return;
         articles.splice(+e.target.dataset.remove, 1);
         renderArticles();
+        scheduleSaveArticles();
       }),
   );
 }
@@ -339,8 +393,7 @@ $("planFile").onchange = (e) => {
 $("generateArticles").onclick = (e) =>
   withBusy(e.currentTarget, "Generating...", async () => {
     if (!(await ensureStyle())) return;
-    $("generateStatus").textContent =
-      "Writing articles for this publication...";
+    $("generateStatus").textContent = "Submitting article generation task...";
     const res = await fetch("/api/generate-articles", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -353,21 +406,39 @@ $("generateArticles").onclick = (e) =>
         textModel,
       }),
     });
-    const data = await res.json();
+    const init = await res.json();
     if (!res.ok) {
-      $("generateStatus").textContent = data.error || "Failed";
+      $("generateStatus").textContent = init.error || "Failed";
       return;
     }
-    workspace = data.workspace || workspace;
+    workspace = init.workspace || workspace;
     updateWorkspaceLabel();
-    articles = articles.concat(
-      (data.articles || []).map((a) =>
-        Object.assign({ kind: "article", pages: 1 }, a),
-      ),
-    );
-    renderArticles();
-    $("generateStatus").textContent =
-      "Generated " + (data.articles || []).length + " articles.";
+    $("generateStatus").textContent = "Generating articles...";
+    await new Promise((resolve) => {
+      startTaskPolling(workspace, init.taskId, null, (t) => {
+        if (t.status === "failed") {
+          $("generateStatus").textContent = t.error || "Failed";
+        } else {
+          try {
+            const data = JSON.parse(t.outputJson);
+            workspace = data.workspace || workspace;
+            updateWorkspaceLabel();
+            articles = articles.concat(
+              (data.articles || []).map((a) =>
+                Object.assign({ kind: "article", pages: 1 }, a),
+              ),
+            );
+            renderArticles();
+            scheduleSaveArticles();
+            $("generateStatus").textContent =
+              "Generated " + (data.articles || []).length + " articles.";
+          } catch (_) {
+            $("generateStatus").textContent = "Could not parse result.";
+          }
+        }
+        resolve();
+      });
+    });
   });
 $("importRSS").onclick = (e) =>
   withBusy(e.currentTarget, "Importing...", async () => {
@@ -375,11 +446,7 @@ $("importRSS").onclick = (e) =>
     const start = parseInt($("rssGroup").value || "0", 10) + 1;
     const end = start + 9;
     $("rssStatus").textContent =
-      "Fetching newest feed items " +
-      start +
-      "-" +
-      end +
-      ", extracting pages and rewriting...";
+      "Submitting import task for feed items " + start + "-" + end + "...";
     const res = await fetch("/api/import-rss", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -393,22 +460,52 @@ $("importRSS").onclick = (e) =>
         textModel,
       }),
     });
-    const data = await res.json();
+    const init = await res.json();
     if (!res.ok) {
-      $("rssStatus").textContent = data.error || "Failed";
+      $("rssStatus").textContent = init.error || "Failed";
       return;
     }
-    workspace = data.workspace || workspace;
+    workspace = init.workspace || workspace;
     updateWorkspaceLabel();
-    articles = articles.concat(
-      (data.articles || []).map((a) =>
-        Object.assign({ kind: "article", pages: 1 }, a),
-      ),
-    );
-    renderArticles();
-    $("rssStatus").textContent =
-      "Imported " + (data.articles || []).length + " rewritten articles.";
+    $("rssStatus").textContent = "Importing and rewriting articles...";
+    await new Promise((resolve) => {
+      startTaskPolling(workspace, init.taskId, null, (t) => {
+        if (t.status === "failed") {
+          $("rssStatus").textContent = t.error || "Failed";
+        } else {
+          try {
+            const data = JSON.parse(t.outputJson);
+            workspace = data.workspace || workspace;
+            updateWorkspaceLabel();
+            articles = articles.concat(
+              (data.articles || []).map((a) =>
+                Object.assign({ kind: "article", pages: 1 }, a),
+              ),
+            );
+            renderArticles();
+            scheduleSaveArticles();
+            $("rssStatus").textContent =
+              "Imported " + (data.articles || []).length + " rewritten articles.";
+          } catch (_) {
+            $("rssStatus").textContent = "Could not parse result.";
+          }
+        }
+        resolve();
+      });
+    });
   });
+function applyBuildResult(data) {
+  lastPlan = data;
+  workspace = data.workspace || workspace;
+  updateWorkspaceLabel();
+  lastPlan.reference = referencePath;
+  pagePool = buildPagePool(data.pages || []);
+  articles = (
+    data.articles && data.articles.length ? data.articles : articles
+  ).map((a) => Object.assign({ kind: "article", pages: 1 }, a));
+  renderArticles();
+  saveState("plan", lastPlan);
+}
 async function buildPlan() {
   if (!(await ensureStyle())) return;
   ensureClientWorkspace();
@@ -425,44 +522,40 @@ async function buildPlan() {
     imageModel,
   };
   const out = $("output");
-  const planCalls = estimatePlanDefapiTextCalls();
-  out.innerHTML = progressHTML(
-    "Waiting for " + planCalls + " planning call(s)...",
-    8,
-    "planProgress",
-  );
+  out.innerHTML = progressHTML("Submitting plan task...", 5, "planProgress");
   renderedImages = {};
-  const progressPoller = workspace
-    ? startProgressPolling(workspace, "build", "planProgress")
-    : null;
-  let res;
-  try {
-    res = await fetch("/api/build", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  } finally {
-    if (progressPoller) progressPoller.stop();
-  }
-  setProgress("planProgress", 90, "Building page order...");
-  const data = await res.json();
+  const res = await fetch("/api/build", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const init = await res.json();
   if (!res.ok) {
     out.innerHTML =
-      '<div class="kit">' + esc(data.error || "Failed") + "</div>";
+      '<div class="kit">' + esc(init.error || "Failed") + "</div>";
     return;
   }
-  lastPlan = data;
-  workspace = data.workspace || workspace;
+  workspace = init.workspace || workspace;
   updateWorkspaceLabel();
-  lastPlan.reference = referencePath;
-  pagePool = buildPagePool(data.pages || []);
-  articles = (
-    data.articles && data.articles.length ? data.articles : articles
-  ).map((a) => Object.assign({ kind: "article", pages: 1 }, a));
-  renderArticles();
-  setProgress("planProgress", 100, "Plan ready.");
-  renderPlan(data);
+  await new Promise((resolve) => {
+    startTaskPolling(workspace, init.taskId, "planProgress", (t) => {
+      if (t.status === "failed") {
+        out.innerHTML =
+          '<div class="kit">' + esc(t.error || "Build failed") + "</div>";
+      } else {
+        try {
+          const data = JSON.parse(t.outputJson);
+          applyBuildResult(data);
+          setProgress("planProgress", 100, "Plan ready.");
+          renderPlan(data);
+        } catch (_) {
+          out.innerHTML =
+            '<div class="kit">Could not parse plan result.</div>';
+        }
+      }
+      resolve();
+    });
+  });
 }
 function ensureClientWorkspace() {
   if (workspace) return;
@@ -632,26 +725,39 @@ function setProgress(id, pct, label) {
 function estimatePlanDefapiTextCalls() {
   return 3 + articles.filter((a) => !a.enhanced).length;
 }
-function startProgressPolling(workspaceId, kind, progressId) {
+function startTaskPolling(workspaceId, taskId, progressId, onDone) {
   let stopped = false;
   async function poll() {
-    if (stopped || !workspaceId) return;
+    if (stopped || !workspaceId || !taskId) return;
     try {
       const res = await fetch(
-        "/api/progress?workspace=" +
+        "/api/task?workspace=" +
           encodeURIComponent(workspaceId) +
-          "&kind=" +
-          encodeURIComponent(kind),
+          "&id=" +
+          encodeURIComponent(taskId),
       );
-      const data = await res.json();
-      if (res.ok && data.total > 0) {
-        const pct = Math.round((data.done / Math.max(1, data.total)) * 100);
+      if (!res.ok) return;
+      const t = await res.json();
+      if (progressId && t.progressTotal > 0) {
+        const pct = Math.round(
+          (t.progressDone / Math.max(1, t.progressTotal)) * 100,
+        );
         const label =
-          data.message + " (" + data.done + " of " + data.total + " complete)";
+          t.progressMsg +
+          " (" +
+          t.progressDone +
+          " of " +
+          t.progressTotal +
+          " complete)";
         setProgress(progressId, pct, label);
       }
+      if (t.status === "done" || t.status === "failed") {
+        stopped = true;
+        clearInterval(timer);
+        if (onDone) onDone(t);
+      }
     } catch (_) {
-      // The main request may still be running; keep polling quietly.
+      // keep polling quietly on network errors
     }
   }
   poll();
@@ -1068,6 +1174,7 @@ function movePage(from, to) {
   pages.splice(to, 0, p);
   renumberPages();
   renderPlan(lastPlan);
+  saveState("plan", lastPlan);
 }
 function renumberPages() {
   lastPlan.pages.forEach((p, i) => {
@@ -1115,11 +1222,24 @@ async function generateCoverPlan() {
       textModel,
     }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "cover plan failed");
-  workspace = data.workspace || workspace;
+  const init = await res.json();
+  if (!res.ok) throw new Error(init.error || "cover plan task start failed");
+  workspace = init.workspace || workspace;
   updateWorkspaceLabel();
-  return data.coverPlan || null;
+  return new Promise((resolve, reject) => {
+    startTaskPolling(workspace, init.taskId, null, (t) => {
+      if (t.status === "failed") {
+        reject(new Error(t.error || "cover plan failed"));
+        return;
+      }
+      try {
+        const data = JSON.parse(t.outputJson);
+        resolve(data.coverPlan || null);
+      } catch (e) {
+        reject(new Error("could not parse cover plan result"));
+      }
+    });
+  });
 }
 async function renderRemainingPages() {
   try {
@@ -1187,16 +1307,16 @@ async function renderRemainingPages() {
   }
 }
 async function renderPage(page, styleReference) {
-  setStatus(page.number, "Rendering...");
+  setStatus(page.number, "Queuing render...");
   const ref = page.number === 1 ? referencePath : "";
-  const renderPage = Object.assign({}, page, {
+  const renderPageData = Object.assign({}, page, {
     prompt: finalRenderPrompt(page),
   });
   const res = await fetch("/api/render-page", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      page: renderPage,
+      page: renderPageData,
       style: lastPlan.style || {},
       issue: issueContext(),
       brandAssets: brandAssetsForRender(page),
@@ -1208,13 +1328,30 @@ async function renderPage(page, styleReference) {
       imageModel,
     }),
   });
-  const data = await res.json();
+  const init = await res.json();
   if (!res.ok) {
-    setStatus(page.number, data.error || "Failed");
-    throw new Error(data.error || "render failed");
+    setStatus(page.number, init.error || "Failed");
+    throw new Error(init.error || "render task start failed");
   }
-  setStatus(page.number, "Rendered");
-  return { image: data.image, publicUrl: data.publicUrl || "" };
+  workspace = init.workspace || workspace;
+  setStatus(page.number, "Rendering...");
+  return new Promise((resolve, reject) => {
+    startTaskPolling(workspace, init.taskId, null, (t) => {
+      if (t.status === "failed") {
+        setStatus(page.number, t.error || "Render failed");
+        reject(new Error(t.error || "render failed"));
+        return;
+      }
+      try {
+        const data = JSON.parse(t.outputJson);
+        setStatus(page.number, "Rendered");
+        resolve({ image: data.image, publicUrl: data.publicUrl || "" });
+      } catch (e) {
+        setStatus(page.number, "Parse error");
+        reject(new Error("could not parse render result"));
+      }
+    });
+  });
 }
 function finalRenderPrompt(page) {
   const side = page.number % 2 === 0 ? "left-hand page" : "right-hand page";
@@ -1476,8 +1613,252 @@ function setStatus(n, msg) {
   const el = $("status-" + n);
   if (el) el.textContent = msg;
 }
+async function restoreWorkspaceState() {
+  if (!workspace) {
+    showStep(1, true);
+    return;
+  }
+  try {
+    const res = await fetch(
+      "/api/tasks?workspace=" + encodeURIComponent(workspace),
+    );
+    if (!res.ok) {
+      showStep(1, true);
+      return;
+    }
+    const { tasks = [], state = {} } = await res.json();
+
+    if (state.style) {
+      try {
+        const s = JSON.parse(state.style);
+        if (s.prompt) $("style").value = s.prompt;
+        if (s.referencePath) referencePath = s.referencePath;
+        if (s.enhancedJson && $("style").value === s.prompt) {
+          $("style").value = s.enhancedJson;
+        }
+      } catch (_) {}
+    }
+
+    if (state.articles) {
+      try {
+        articles = JSON.parse(state.articles);
+        renderArticles();
+      } catch (_) {}
+    }
+
+    if (state.plan) {
+      try {
+        applyBuildResult(JSON.parse(state.plan));
+      } catch (_) {}
+    } else {
+      const doneBuild = tasks.find(
+        (t) => t.kind === "build" && t.status === "done",
+      );
+      if (doneBuild) {
+        try {
+          applyBuildResult(JSON.parse(doneBuild.outputJson));
+        } catch (_) {}
+      }
+    }
+
+    tasks
+      .filter((t) => t.kind === "render-page" && t.status === "done")
+      .forEach((t) => {
+        try {
+          const inp = JSON.parse(t.inputJson || "{}");
+          const out = JSON.parse(t.outputJson || "{}");
+          if (inp.page && inp.page.number && out.image) {
+            renderedImages[inp.page.number] = {
+              image: out.image,
+              publicUrl: out.publicUrl || "",
+            };
+          }
+        } catch (_) {}
+      });
+    if (lastPlan) renderPlan(lastPlan);
+
+    const runningBuild = tasks.find(
+      (t) => t.kind === "build" && t.status === "running",
+    );
+    if (runningBuild) {
+      const out = $("output");
+      if (out)
+        out.innerHTML = progressHTML("Reconnecting to build...", 10, "planProgress");
+      startTaskPolling(workspace, runningBuild.id, "planProgress", (t) => {
+        if (t.status === "done") {
+          try {
+            applyBuildResult(JSON.parse(t.outputJson));
+            renderPlan(lastPlan);
+          } catch (_) {}
+        }
+      });
+    }
+
+    const savedStep = parseInt(state.step || "0", 10);
+    const runningRenders = tasks.filter(
+      (t) => t.kind === "render-page" && t.status === "running",
+    );
+    const needsRenderResume =
+      lastPlan &&
+      savedStep === 4 &&
+      lastPlan.pages.some((p) => !renderedImages[p.number]);
+
+    if (needsRenderResume) {
+      resumeRenderPhase(runningRenders);
+      return;
+    }
+
+    if (savedStep >= 1 && savedStep <= 4) {
+      showStep(savedStep, true);
+    } else if (lastPlan) {
+      showStep(3, true);
+    } else {
+      showStep(1, true);
+    }
+  } catch (_) {
+    showStep(1, true);
+  }
+}
+
+async function resumeRenderPhase(runningRenderTasks) {
+  if (!lastPlan) return;
+  isRendering = true;
+  renderCallTotal = lastPlan.pages.length + 2;
+  renderCallDone = 1 + Object.keys(renderedImages).length;
+  showStep(4, true);
+  $("renderStatus").innerHTML = progressHTML(
+    "Resuming render (" +
+      Object.keys(renderedImages).length +
+      " of " +
+      lastPlan.pages.length +
+      " pages done)...",
+    Math.round((renderCallDone / Math.max(1, renderCallTotal)) * 100),
+    "renderProgress",
+  );
+  renderPlan(lastPlan);
+  try {
+    // Poll all currently running render-page tasks in parallel
+    await Promise.all(
+      runningRenderTasks.map((t) => {
+        let pageNum;
+        try {
+          pageNum = JSON.parse(t.inputJson || "{}").page?.number;
+        } catch (_) {}
+        if (!pageNum) return Promise.resolve();
+        setStatus(pageNum, "Rendering...");
+        return new Promise((resolve) => {
+          startTaskPolling(workspace, t.id, null, (done) => {
+            if (done.status === "done") {
+              try {
+                const out = JSON.parse(done.outputJson || "{}");
+                renderedImages[pageNum] = {
+                  image: out.image,
+                  publicUrl: out.publicUrl || "",
+                };
+                completeRenderCall("Rendered page " + pageNum);
+                renderPlan(lastPlan);
+              } catch (_) {}
+            } else {
+              setStatus(pageNum, done.error || "Failed");
+            }
+            resolve();
+          });
+        });
+      }),
+    );
+    // Render any pages that are still missing (not started or failed)
+    const remaining = lastPlan.pages.filter((p) => !renderedImages[p.number]);
+    if (remaining.length > 0) {
+      let idx = 0;
+      async function worker() {
+        while (idx < remaining.length) {
+          const p = remaining[idx++];
+          try {
+            const img = await renderPage(p, "");
+            renderedImages[p.number] = img;
+            completeRenderCall("Rendered page " + p.number);
+            renderPlan(lastPlan);
+          } catch (_) {}
+        }
+      }
+      await Promise.all([worker(), worker(), worker()]);
+    }
+    // Write PDF
+    const ordered = lastPlan.pages
+      .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
+      .filter(Boolean);
+    if (ordered.length !== lastPlan.pages.length) {
+      throw new Error(
+        "Missing rendered pages: expected " +
+          lastPlan.pages.length +
+          ", got " +
+          ordered.length,
+      );
+    }
+    setRenderProgress("Writing PDF");
+    const res = await fetch("/api/write-pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: $("title").value,
+        images: ordered,
+        workspace,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      $("renderStatus").textContent = data.error || "PDF failed";
+      return;
+    }
+    completeRenderCall("PDF ready");
+    setProgress("renderProgress", 100, "Done. Download should start automatically.");
+    $("renderStatus").insertAdjacentHTML(
+      "beforeend",
+      '<div class="status"><a href="' +
+        esc(data.pdf) +
+        '" target="_blank">Open PDF</a></div>',
+    );
+    const a = document.createElement("a");
+    a.href = data.pdf;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (e) {
+    $("renderStatus").textContent = e.message || "Render failed";
+  } finally {
+    isRendering = false;
+    renderPlan(lastPlan);
+  }
+}
+
+function wireLoadWorkspace() {
+  const btn = $("loadWorkspace");
+  const inp = $("workspaceInput");
+  if (!btn || !inp) return;
+  async function doLoad() {
+    const id = inp.value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "");
+    if (!id) return;
+    workspace = id;
+    articles = [];
+    lastPlan = null;
+    renderedImages = {};
+    isRendering = false;
+    updateWorkspaceLabel();
+    await restoreWorkspaceState();
+  }
+  btn.onclick = doLoad;
+  inp.onkeydown = (e) => {
+    if (e.key === "Enter") doLoad();
+  };
+}
+
 renderArticles();
 initModelSelectors();
 updateWorkspaceLabel();
-showStep(1);
 requireApiKey();
+wireLoadWorkspace();
+restoreWorkspaceState();

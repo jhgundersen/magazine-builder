@@ -28,7 +28,7 @@ func TestEmbeddedStaticAssetsServeOutsideRepo(t *testing.T) {
 		}
 	})
 
-	s := &server{cfg: config{WorkDir: t.TempDir()}, progress: map[string]progressStatus{}}
+	s := &server{cfg: config{WorkDir: t.TempDir()}}
 	handler, err := s.routes()
 	if err != nil {
 		t.Fatal(err)

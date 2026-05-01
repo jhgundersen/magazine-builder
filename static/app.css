@@ -99,6 +99,19 @@ button:disabled {
   border-radius: 6px;
   padding: 8px 10px;
 }
+.workspace-load {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.workspace-load input {
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  width: 220px;
+  background: white;
+}
 .model-bar {
   display: grid;
   grid-template-columns: repeat(2, minmax(180px, 240px));

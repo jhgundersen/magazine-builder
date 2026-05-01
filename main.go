@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"encoding/xml"
@@ -65,17 +66,8 @@ type config struct {
 }
 
 type server struct {
-	cfg      config
-	mu       sync.Mutex
-	progress map[string]progressStatus
-}
-
-type progressStatus struct {
-	Kind    string `json:"kind"`
-	Done    int    `json:"done"`
-	Total   int    `json:"total"`
-	Message string `json:"message"`
-	Running bool   `json:"running"`
+	cfg config
+	dbs sync.Map
 }
 
 type apiKeyContextKey struct{}
@@ -445,7 +437,8 @@ func main() {
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		log.Fatal(err)
 	}
-	s := &server{cfg: cfg, progress: map[string]progressStatus{}}
+	s := &server{cfg: cfg}
+	s.startupCleanup()
 	if cfg.WorkspaceMaxAge > 0 {
 		go s.cleanupLoop()
 	}
@@ -474,7 +467,9 @@ func (s *server) routes() (http.Handler, error) {
 	mux.HandleFunc("/api/cover-plan", s.handleCoverPlan)
 	mux.HandleFunc("/api/render-page", s.handleRenderPage)
 	mux.HandleFunc("/api/write-pdf", s.handleWritePDF)
-	mux.HandleFunc("/api/progress", s.handleProgress)
+	mux.HandleFunc("/api/task", s.handleGetTask)
+	mux.HandleFunc("/api/tasks", s.handleListTasks)
+	mux.HandleFunc("/api/workspace-state", s.handleSetState)
 	mux.Handle("/static/", http.StripPrefix("/static/", noCache(http.FileServer(http.FS(staticFS)))))
 	mux.Handle("/work/", http.StripPrefix("/work/", http.FileServer(http.Dir(s.cfg.WorkDir))))
 	return mux, nil
@@ -720,33 +715,67 @@ func (s *server) handleEnhanceStyle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithModels(contextWithAPIKey(r.Context(), r.FormValue("apiKey")), r.FormValue("textModel"), "")
-	title := strings.TrimSpace(r.FormValue("title"))
-	style := strings.TrimSpace(r.FormValue("style"))
-	workspace, err := s.ensureWorkspace(r.FormValue("workspace"), style)
+	inp := enhanceStyleInput{
+		APIKey:        r.FormValue("apiKey"),
+		TextModel:     r.FormValue("textModel"),
+		Title:         strings.TrimSpace(r.FormValue("title")),
+		Style:         strings.TrimSpace(r.FormValue("style")),
+		Workspace:     r.FormValue("workspace"),
+		ReferencePath: strings.TrimSpace(r.FormValue("reference")),
+	}
+	if inp.ReferencePath != "" && defapiImageRef(inp.ReferencePath) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("reference must be a public http(s) image URL"))
+		return
+	}
+	workspace, err := s.ensureWorkspace(inp.Workspace, inp.Style)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx = contextWithWorkspace(ctx, workspace)
-	referencePath := strings.TrimSpace(r.FormValue("reference"))
-	if referencePath != "" && defapiImageRef(referencePath) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("reference must be a public http(s) image URL"))
+	inp.Workspace = workspace
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	enhanced, err := s.enhanceStyle(ctx, title, style, referencePath)
+	taskID := newTaskID()
+	if err := createTask(db, "enhance-style", taskID, taskJSONOutput(inp)); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	go s.runEnhanceStyleTask(db, workspace, taskID, inp)
+	writeJSON(w, map[string]string{"taskId": taskID, "workspace": workspace})
+}
+
+func (s *server) runEnhanceStyleTask(db *sql.DB, workspace, taskID string, inp enhanceStyleInput) {
+	ctx := context.Background()
+	ctx = contextWithModels(contextWithAPIKey(ctx, inp.APIKey), inp.TextModel, "")
+	ctx = contextWithWorkspace(ctx, workspace)
+	if err := startTask(db, taskID); err != nil {
+		log.Printf("runEnhanceStyleTask startTask: %v", err)
+	}
+	var taskErr error
+	defer func() {
+		if r := recover(); r != nil {
+			taskErr = fmt.Errorf("panic: %v", r)
+		}
+		if taskErr != nil {
+			taskLogErr("runEnhanceStyleTask failTask", failTask(db, taskID, taskErr.Error()))
+		}
+	}()
+	enhanced, err := s.enhanceStyle(ctx, inp.Title, inp.Style, inp.ReferencePath)
 	if err != nil {
 		log.Printf("defapi text style enhancement failed: %v", err)
 		s.workspaceLog(workspace, "style: enhancement failed: %v", err)
-		enhanced = fallbackStyle(style, referencePath)
+		enhanced = fallbackStyle(inp.Style, inp.ReferencePath)
 	}
-	if title != "" {
-		enhanced.Name = title
+	if inp.Title != "" {
+		enhanced.Name = inp.Title
 	}
 	styleJSON, _ := json.MarshalIndent(enhanced, "", "  ")
-	s.workspaceLog(workspace, "style: source title=%q reference=%q user_style=%q", title, referencePath, compact(style, 1200))
+	s.workspaceLog(workspace, "style: source title=%q reference=%q user_style=%q", inp.Title, inp.ReferencePath, compact(inp.Style, 1200))
 	s.workspaceLogJSON(workspace, "style: enhanced JSON", enhanced)
-	writeJSON(w, styleResponse{EnhancedStyle: string(styleJSON), Style: enhanced, ReferencePath: referencePath, Workspace: workspace})
+	taskErr = completeTask(db, taskID, taskJSONOutput(styleResponse{EnhancedStyle: string(styleJSON), Style: enhanced, ReferencePath: inp.ReferencePath, Workspace: workspace}))
 }
 
 func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
@@ -759,7 +788,6 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, "")
 	if req.Limit <= 0 || req.Limit > 50 {
 		req.Limit = 10
 	}
@@ -771,12 +799,41 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	taskID := newTaskID()
+	if err := createTask(db, "import-rss", taskID, taskJSONOutput(req)); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	go s.runImportRSSTask(db, workspace, taskID, req)
+	writeJSON(w, map[string]string{"taskId": taskID, "workspace": workspace})
+}
+
+func (s *server) runImportRSSTask(db *sql.DB, workspace, taskID string, req rssRequest) {
+	ctx := context.Background()
+	ctx = contextWithModels(contextWithAPIKey(ctx, req.APIKey), req.TextModel, "")
 	ctx = contextWithWorkspace(ctx, workspace)
+	if err := startTask(db, taskID); err != nil {
+		log.Printf("runImportRSSTask startTask: %v", err)
+	}
+	var taskErr error
+	defer func() {
+		if r := recover(); r != nil {
+			taskErr = fmt.Errorf("panic: %v", r)
+		}
+		if taskErr != nil {
+			taskLogErr("runImportRSSTask failTask", failTask(db, taskID, taskErr.Error()))
+		}
+	}()
 	s.workspaceLog(workspace, "rss-import: start url=%q offset=%d limit=%d", req.URL, req.Offset, req.Limit)
 	articles, err := fetchRSS(ctx, req.URL, req.Offset, req.Limit)
 	if err != nil {
 		s.workspaceLog(workspace, "rss-import: fetch failed: %v", err)
-		writeError(w, http.StatusBadGateway, err)
+		taskErr = err
 		return
 	}
 	style := parseStyle(req.Style)
@@ -822,7 +879,7 @@ func (s *server) handleImportRSS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.workspaceLogJSON(workspace, "rss-import: rewritten articles", rewriteEntries)
 	s.workspaceLog(workspace, "rss-import: complete articles=%d rewritten=%d", len(articles), countEnhancedArticles(articles))
-	writeJSON(w, map[string]any{"articles": articles, "workspace": workspace})
+	taskErr = completeTask(db, taskID, taskJSONOutput(map[string]any{"articles": articles, "workspace": workspace}))
 }
 
 func (s *server) handleGenerateArticles(w http.ResponseWriter, r *http.Request) {
@@ -835,7 +892,6 @@ func (s *server) handleGenerateArticles(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, "")
 	if req.Count <= 0 || req.Count > 12 {
 		req.Count = 4
 	}
@@ -844,14 +900,43 @@ func (s *server) handleGenerateArticles(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	taskID := newTaskID()
+	if err := createTask(db, "generate-articles", taskID, taskJSONOutput(req)); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	go s.runGenerateArticlesTask(db, workspace, taskID, req)
+	writeJSON(w, map[string]string{"taskId": taskID, "workspace": workspace})
+}
+
+func (s *server) runGenerateArticlesTask(db *sql.DB, workspace, taskID string, req generateArticlesRequest) {
+	ctx := context.Background()
+	ctx = contextWithModels(contextWithAPIKey(ctx, req.APIKey), req.TextModel, "")
 	ctx = contextWithWorkspace(ctx, workspace)
+	if err := startTask(db, taskID); err != nil {
+		log.Printf("runGenerateArticlesTask startTask: %v", err)
+	}
+	var taskErr error
+	defer func() {
+		if r := recover(); r != nil {
+			taskErr = fmt.Errorf("panic: %v", r)
+		}
+		if taskErr != nil {
+			taskLogErr("runGenerateArticlesTask failTask", failTask(db, taskID, taskErr.Error()))
+		}
+	}()
 	style := parseStyle(req.Style)
 	articles, err := s.generateArticles(ctx, req.Title, style, req.Count)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		taskErr = err
 		return
 	}
-	writeJSON(w, map[string]any{"articles": articles, "workspace": workspace})
+	taskErr = completeTask(db, taskID, taskJSONOutput(map[string]any{"articles": articles, "workspace": workspace}))
 }
 
 func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
@@ -864,16 +949,45 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, req.ImageModel)
 	req.PageCount = normalizePageCount(req.PageCount)
 	req.Articles = cleanArticles(req.Articles)
-	style := parseStyle(req.Style)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Title)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	taskID := newTaskID()
+	inputJSON := taskJSONOutput(req)
+	if err := createTask(db, "build", taskID, inputJSON); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	go s.runBuildTask(db, workspace, taskID, req)
+	writeJSON(w, map[string]string{"taskId": taskID, "workspace": workspace})
+}
+
+func (s *server) runBuildTask(db *sql.DB, workspace, taskID string, req buildRequest) {
+	ctx := context.Background()
+	ctx = contextWithModels(contextWithAPIKey(ctx, req.APIKey), req.TextModel, req.ImageModel)
 	ctx = contextWithWorkspace(ctx, workspace)
+	if err := startTask(db, taskID); err != nil {
+		log.Printf("runBuildTask startTask: %v", err)
+	}
+	var taskErr error
+	defer func() {
+		if r := recover(); r != nil {
+			taskErr = fmt.Errorf("panic: %v", r)
+		}
+		if taskErr != nil {
+			taskLogErr("runBuildTask failTask", failTask(db, taskID, taskErr.Error()))
+		}
+	}()
+	style := parseStyle(req.Style)
 	total := 3
 	for _, a := range req.Articles {
 		if !a.Enhanced {
@@ -881,17 +995,11 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	done := 0
-	completed := false
-	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Starting defapi text work", Running: true})
-	defer func() {
-		if !completed {
-			s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Build interrupted or failed", Running: false})
-		}
-	}()
+	s.taskProgress(db, taskID, done, total, "Starting defapi text work")
 	s.workspaceLog(workspace, "build: start title=%q articles=%d pages=%d", req.Title, len(req.Articles), req.PageCount)
 	s.workspaceLogJSON(workspace, "build: style JSON", style)
 	s.workspaceLogJSON(workspace, "build: input articles", articleLogEntries(req.Articles, false))
-	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Choosing issue number and date", Running: true})
+	s.taskProgress(db, taskID, done, total, "Choosing issue number and date")
 	issue, err := s.generateIssueContext(ctx, req, style)
 	if err != nil {
 		log.Printf("defapi text issue context failed: %v", err)
@@ -904,9 +1012,8 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if req.Articles[i].Enhanced {
 			continue
 		}
-		s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewriting %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
+		s.taskProgress(db, taskID, done, total, fmt.Sprintf("Rewriting %q", emptyDefault(req.Articles[i].Title, "Untitled")))
 		var improved article
-		var err error
 		if req.Articles[i].Kind == "feature" {
 			improved, err = s.rewriteFeatureForStyle(ctx, req.Articles[i], style)
 		} else {
@@ -916,16 +1023,16 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 			log.Printf("defapi text manual article rewrite failed for %q: %v", req.Articles[i].Title, err)
 			s.workspaceLog(workspace, "build: rewrite failed index=%d title=%q error=%v", i, req.Articles[i].Title, err)
 			done++
-			s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewrite failed for %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
+			s.taskProgress(db, taskID, done, total, fmt.Sprintf("Rewrite failed for %q", emptyDefault(req.Articles[i].Title, "Untitled")))
 			continue
 		}
 		improved.Enhanced = true
 		req.Articles[i] = improved
 		s.workspaceLogJSON(workspace, fmt.Sprintf("build: rewritten article index=%d", i), articleLogEntryFromArticle(i, req.Articles[i], true))
 		done++
-		s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: fmt.Sprintf("Rewritten %q", emptyDefault(req.Articles[i].Title, "Untitled")), Running: true})
+		s.taskProgress(db, taskID, done, total, fmt.Sprintf("Rewritten %q", emptyDefault(req.Articles[i].Title, "Untitled")))
 	}
-	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Generating creative kit", Running: true})
+	s.taskProgress(db, taskID, done, total, "Generating creative kit")
 	kit, err := s.generateCreativeKit(ctx, req, style, issue)
 	if err != nil {
 		log.Printf("defapi text creative kit failed: %v", err)
@@ -935,7 +1042,7 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	s.workspaceLogJSON(workspace, "build: final articles", articleLogEntries(req.Articles, true))
 	s.workspaceLogJSON(workspace, "build: creative kit JSON", kit)
 	done++
-	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Generating brand assets", Running: true})
+	s.taskProgress(db, taskID, done, total, "Generating brand assets")
 	brandAssets, err := s.generateBrandAssets(ctx, workspace, req, style, issue)
 	if err != nil {
 		log.Printf("defapi image brand assets failed: %v", err)
@@ -943,21 +1050,100 @@ func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	s.workspaceLogJSON(workspace, "build: brand assets JSON", brandAssets)
 	done++
-	s.setProgress(workspace, progressStatus{Kind: "build", Done: done, Total: total, Message: "Plan ready", Running: false})
-	completed = true
+	s.taskProgress(db, taskID, done, total, "Plan ready")
 	s.workspaceLog(workspace, "build: complete")
-	writeJSON(w, buildResponse{Style: style, CreativeKit: kit, BrandAssets: brandAssets, Articles: req.Articles, Pages: planMagazine(req, style, kit, issue), Issue: issue, Workspace: workspace})
+	result := buildResponse{Style: style, CreativeKit: kit, BrandAssets: brandAssets, Articles: req.Articles, Pages: planMagazine(req, style, kit, issue), Issue: issue, Workspace: workspace}
+	taskErr = completeTask(db, taskID, taskJSONOutput(result))
 }
 
-func (s *server) handleProgress(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
 	}
 	workspace := sanitizeWorkspace(r.URL.Query().Get("workspace"))
-	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
-	status := s.progressStatus(workspace, kind)
-	writeJSON(w, status)
+	taskID := strings.TrimSpace(r.URL.Query().Get("id"))
+	if workspace == "" || taskID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("workspace and id required"))
+		return
+	}
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	t, err := getTask(db, taskID)
+	if errIsNotFound(err) {
+		writeError(w, http.StatusNotFound, errors.New("task not found"))
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, t)
+}
+
+func (s *server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	workspace := sanitizeWorkspace(r.URL.Query().Get("workspace"))
+	if workspace == "" {
+		writeError(w, http.StatusBadRequest, errors.New("workspace required"))
+		return
+	}
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	tasks, err := listTasks(db)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	st, err := getAllState(db)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if tasks == nil {
+		tasks = []task{}
+	}
+	writeJSON(w, map[string]any{"tasks": tasks, "state": st})
+}
+
+func (s *server) handleSetState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req struct {
+		Workspace string `json:"workspace"`
+		Key       string `json:"key"`
+		Value     string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	workspace := sanitizeWorkspace(req.Workspace)
+	if workspace == "" || req.Key == "" {
+		writeError(w, http.StatusBadRequest, errors.New("workspace and key required"))
+		return
+	}
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := setState(db, req.Key, req.Value); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]string{"ok": "true"})
 }
 
 func (s *server) handleCoverPlan(w http.ResponseWriter, r *http.Request) {
@@ -970,13 +1156,41 @@ func (s *server) handleCoverPlan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, "")
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Title)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	taskID := newTaskID()
+	if err := createTask(db, "cover-plan", taskID, taskJSONOutput(req)); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	go s.runCoverPlanTask(db, workspace, taskID, req)
+	writeJSON(w, map[string]string{"taskId": taskID, "workspace": workspace})
+}
+
+func (s *server) runCoverPlanTask(db *sql.DB, workspace, taskID string, req coverPlanRequest) {
+	ctx := context.Background()
+	ctx = contextWithModels(contextWithAPIKey(ctx, req.APIKey), req.TextModel, "")
 	ctx = contextWithWorkspace(ctx, workspace)
+	if err := startTask(db, taskID); err != nil {
+		log.Printf("runCoverPlanTask startTask: %v", err)
+	}
+	var taskErr error
+	defer func() {
+		if r := recover(); r != nil {
+			taskErr = fmt.Errorf("panic: %v", r)
+		}
+		if taskErr != nil {
+			taskLogErr("runCoverPlanTask failTask", failTask(db, taskID, taskErr.Error()))
+		}
+	}()
 	s.workspaceLog(workspace, "cover-plan: start pages=%d", len(req.Pages))
 	issue := normalizeIssueContext(req.Issue, time.Now())
 	plan, err := s.generateCoverPlan(ctx, req.Title, req.Style, req.Pages, issue)
@@ -984,7 +1198,7 @@ func (s *server) handleCoverPlan(w http.ResponseWriter, r *http.Request) {
 		s.workspaceLog(workspace, "cover-plan: failed: %v", err)
 		plan = fallbackCoverPlan(req.Style, req.Pages)
 	}
-	writeJSON(w, map[string]any{"coverPlan": plan, "workspace": workspace})
+	taskErr = completeTask(db, taskID, taskJSONOutput(map[string]any{"coverPlan": plan, "workspace": workspace}))
 }
 
 func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
@@ -997,26 +1211,54 @@ func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := contextWithModels(contextWithAPIKey(r.Context(), req.APIKey), req.TextModel, req.ImageModel)
-	images := filterStrings([]string{req.StyleReference, req.Reference})
-	images = append(images, brandAssetRefsForPage(req.Page, req.BrandAssets)...)
-	images = append(images, req.Page.Images...)
 	workspace, err := s.ensureWorkspace(req.Workspace, req.Page.Title)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	taskID := newTaskID()
+	if err := createTask(db, "render-page", taskID, taskJSONOutput(req)); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	go s.runRenderPageTask(db, workspace, taskID, req)
+	writeJSON(w, map[string]string{"taskId": taskID, "workspace": workspace})
+}
+
+func (s *server) runRenderPageTask(db *sql.DB, workspace, taskID string, req renderPageRequest) {
+	ctx := context.Background()
+	ctx = contextWithModels(contextWithAPIKey(ctx, req.APIKey), req.TextModel, req.ImageModel)
+	if err := startTask(db, taskID); err != nil {
+		log.Printf("runRenderPageTask startTask: %v", err)
+	}
+	var taskErr error
+	defer func() {
+		if r := recover(); r != nil {
+			taskErr = fmt.Errorf("panic: %v", r)
+		}
+		if taskErr != nil {
+			taskLogErr("runRenderPageTask failTask", failTask(db, taskID, taskErr.Error()))
+		}
+	}()
+	images := filterStrings([]string{req.StyleReference, req.Reference})
+	images = append(images, brandAssetRefsForPage(req.Page, req.BrandAssets)...)
+	images = append(images, req.Page.Images...)
 	issue := normalizeIssueContext(req.Issue, time.Now())
 	req.Page.Prompt = s.pagePromptWithFurniture(ctx, req.Style, req.Page, issue)
 	s.workspaceLog(workspace, "render-page: start page=%d title=%q refs=%d", req.Page.Number, req.Page.Title, len(images))
 	image, err := s.runDefapiImageWithRetry(ctx, workspace, req.Page.Number, smartLimitImagePrompt(req.Page.Prompt, s.cfg.DefapiImageMaxPromptChars), images)
 	if err != nil {
 		s.workspaceLog(workspace, "render-page: failed page=%d: %v", req.Page.Number, err)
-		writeError(w, http.StatusBadGateway, err)
+		taskErr = err
 		return
 	}
 	s.workspaceLog(workspace, "render-page: complete page=%d image=%s public=%s", req.Page.Number, image.Image, image.PublicURL)
-	writeJSON(w, renderPageResponse{Image: image.Image, PublicURL: image.PublicURL})
+	taskErr = completeTask(db, taskID, taskJSONOutput(renderPageResponse{Image: image.Image, PublicURL: image.PublicURL}))
 }
 
 func (s *server) handleWritePDF(w http.ResponseWriter, r *http.Request) {
@@ -1095,38 +1337,6 @@ func (s *server) workspaceLogJSON(workspace, label string, v any) {
 	s.workspaceLog(workspace, "%s:\n%s", label, data)
 }
 
-func (s *server) setProgress(workspace string, status progressStatus) {
-	workspace = sanitizeWorkspace(workspace)
-	if workspace == "" {
-		return
-	}
-	if status.Kind == "" {
-		status.Kind = "default"
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.progress == nil {
-		s.progress = map[string]progressStatus{}
-	}
-	s.progress[workspace+":"+status.Kind] = status
-}
-
-func (s *server) progressStatus(workspace, kind string) progressStatus {
-	workspace = sanitizeWorkspace(workspace)
-	kind = strings.TrimSpace(kind)
-	if kind == "" {
-		kind = "default"
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.progress == nil {
-		return progressStatus{Kind: kind, Message: "No progress yet"}
-	}
-	if status, ok := s.progress[workspace+":"+kind]; ok {
-		return status
-	}
-	return progressStatus{Kind: kind, Message: "No progress yet"}
-}
 
 func (s *server) workspaceDir(workspace string) string {
 	return filepath.Join(s.cfg.WorkDir, sanitizeWorkspace(workspace))
@@ -1168,9 +1378,13 @@ func (s *server) cleanupWorkspaces() {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			dir := filepath.Join(s.cfg.WorkDir, e.Name())
+			workspace := e.Name()
+			dir := filepath.Join(s.cfg.WorkDir, workspace)
+			if v, ok := s.dbs.LoadAndDelete(workspace); ok {
+				_ = v.(*sql.DB).Close()
+			}
 			if err := os.RemoveAll(dir); err == nil {
-				log.Printf("cleanup: removed workspace %s (age %s)", e.Name(), time.Since(info.ModTime()).Round(time.Minute))
+				log.Printf("cleanup: removed workspace %s (age %s)", workspace, time.Since(info.ModTime()).Round(time.Minute))
 			}
 		}
 	}
