@@ -469,7 +469,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.DefapiImageSize, "defapi-image-size", "auto", "defapi image output size")
 	flag.StringVar(&cfg.DefapiImageQuality, "defapi-image-quality", "high", "defapi image output quality")
 	flag.StringVar(&cfg.DefapiImageBackground, "defapi-image-background", "opaque", "defapi image background")
-	flag.IntVar(&cfg.DefapiImageMaxPromptChars, "defapi-image-max-prompt-chars", 4000, "maximum defapi image prompt length")
+	flag.IntVar(&cfg.DefapiImageMaxPromptChars, "defapi-image-max-prompt-chars", 3990, "maximum defapi image prompt length")
 	flag.IntVar(&cfg.DefapiImageRetries, "defapi-image-retries", 2, "retry attempts for failed defapi image calls")
 	flag.Parse()
 	return cfg
@@ -977,7 +977,7 @@ func (s *server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 	issue := normalizeIssueContext(req.Issue, time.Now())
 	req.Page.Prompt = s.pagePromptWithFurniture(ctx, req.Style, req.Page, issue)
 	s.workspaceLog(workspace, "render-page: start page=%d title=%q refs=%d", req.Page.Number, req.Page.Title, len(images))
-	image, err := s.runDefapiImageWithRetry(ctx, workspace, req.Page.Number, limitPrompt(req.Page.Prompt, s.cfg.DefapiImageMaxPromptChars), images)
+	image, err := s.runDefapiImageWithRetry(ctx, workspace, req.Page.Number, smartLimitImagePrompt(req.Page.Prompt, s.cfg.DefapiImageMaxPromptChars), images)
 	if err != nil {
 		s.workspaceLog(workspace, "render-page: failed page=%d: %v", req.Page.Number, err)
 		writeError(w, http.StatusBadGateway, err)
@@ -1232,11 +1232,11 @@ func (s *server) generateBrandAssets(ctx context.Context, workspace string, req 
 func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
 	bodyRange := "900-1600"
 	bodySample := compact(a.Body, 3200)
-	maxTokens := 1000
+	maxTokens := 2000
 	if a.Kind == "podcast" {
 		bodyRange = "1800-2800"
 		bodySample = sampleLongText(a.Body, 6500)
-		maxTokens = 1600
+		maxTokens = 3000
 	}
 	lengthNote := strings.TrimSpace(style.ArticleLength)
 	if lengthNote == "" {
@@ -1728,7 +1728,7 @@ func (s *server) runDefapiImage(ctx context.Context, workspace string, pageNumbe
 		args = append(args, "-image", ref)
 	}
 	s.workspaceLog(workspace, "defapi image: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(prompt)), len(images), len(refs))
-	args = append(commandArgs(s.cfg.DefapiImageCategory, imageModelFromContext(ctx, s.cfg.DefapiImageModel)), append(args, limitPrompt(prompt, s.cfg.DefapiImageMaxPromptChars))...)
+	args = append(commandArgs(s.cfg.DefapiImageCategory, imageModelFromContext(ctx, s.cfg.DefapiImageModel)), append(args, smartLimitImagePrompt(prompt, s.cfg.DefapiImageMaxPromptChars))...)
 	cmd := exec.CommandContext(cctx, s.cfg.DefapiImageCmd, args...)
 	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -2914,6 +2914,46 @@ func limitPrompt(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if max <= 0 || len([]rune(s)) <= max {
 		return s
+	}
+	r := []rune(s)
+	return string(r[:max])
+}
+
+// smartLimitImagePrompt reduces the image prompt to max runes, preferring to
+// trim verbose JSON fields (style.visual_brief, style.creative_kit) before
+// falling back to a hard rune cut.
+func smartLimitImagePrompt(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max <= 0 || len([]rune(s)) <= max {
+		return s
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(s), &m) == nil {
+		style, _ := m["style"].(map[string]any)
+		for _, field := range []string{"visual_brief", "creative_kit"} {
+			if style == nil {
+				break
+			}
+			val, ok := style[field].(string)
+			if !ok {
+				continue
+			}
+			excess := len([]rune(s)) - max
+			newLen := len([]rune(val)) - excess - 20
+			if newLen < 80 {
+				newLen = 80
+			}
+			if newLen < len([]rune(val)) {
+				style[field] = string([]rune(val)[:newLen])
+				m["style"] = style
+				if b, err := json.Marshal(m); err == nil {
+					s = string(b)
+					if len([]rune(s)) <= max {
+						return s
+					}
+				}
+			}
+		}
 	}
 	r := []rune(s)
 	return string(r[:max])
