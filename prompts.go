@@ -150,7 +150,7 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article,
 			"requirements": "use the supplied issue number/date/year for issue furniture if shown, price/barcode or equivalent cover furniture, strong hierarchy",
 			"cover_lines":  "story references and final page numbers are supplied at render time",
 		},
-		"constraints": []string{"full page visible", "no crop", "consistent print magazine design", "avoid " + style.Avoid},
+		"constraints": []string{"consistent print magazine design", "avoid " + style.Avoid},
 	})
 }
 
@@ -193,15 +193,17 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 	content := map[string]any{
 		"title":            a.Title,
 		"brief_body":       bodyText,
-		"series_note":      seriesNote,
 		"modules":          modules,
 		"image_text_notes": articleImageTextNotes(a),
+	}
+	if seriesNote != "" {
+		content["series_note"] = seriesNote
 	}
 	if storyOverview != "" {
 		content["story_overview"] = storyOverview
 	}
 
-	constraints := []string{"full page visible", "no crop", "keep page furniture consistent across issue", "avoid " + style.Avoid}
+	constraints := []string{"avoid " + style.Avoid}
 	if totalParts > 1 {
 		constraints = append(constraints, fmt.Sprintf("visual style (palette, illustration approach, typography) must be consistent across all %d pages of this article", totalParts))
 		if part > 1 {
@@ -249,7 +251,7 @@ func genericPrompt(n int, title string, style magazineStyle, modules, kind, task
 		"content": map[string]any{
 			"module_ideas": modules,
 		},
-		"constraints": []string{"full page visible", "no crop", "fictional brands only unless supplied by article content", "avoid " + style.Avoid},
+		"constraints": []string{"fictional brands only unless supplied by article content", "avoid " + style.Avoid},
 	})
 }
 
@@ -272,7 +274,6 @@ func posterPrompt(title string, style magazineStyle, userPrompt string, issue is
 			"image_description": compact(userPrompt, 800),
 		},
 		"constraints": []string{
-			"full page visible", "no crop",
 			"pure image composition — no headline, no byline, no body text columns",
 			"a small title or short caption is acceptable only if it strongly enhances the composition",
 			"avoid " + style.Avoid,
@@ -289,7 +290,7 @@ func imageStyleBrief(style magazineStyle, kind string) string {
 		"Typography: " + style.Typography,
 		"Palette: " + style.Color,
 		"Print treatment: " + style.Print,
-		"Page furniture: same margins, column grid, running-header placement, footer rule, folio placement and image-text treatment on every page.",
+		"Page furniture: fixed margins and column grid; running-header at the top; footer rule and folio at the outer bottom corner; uniform image-text treatment.",
 		"Avoid: " + style.Avoid,
 	}, " "), 1200)
 }

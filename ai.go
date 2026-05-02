@@ -356,13 +356,11 @@ func (s *server) pagePromptWithFurniture(ctx context.Context, style magazineStyl
 	side := pageSide(page.Number)
 	outer := pageNumberSide(page.Number)
 	payload := map[string]any{
-		"header":   copy.Header,
-		"footer":   copy.Footer,
-		"issue":    issue,
-		"language": emptyDefault(style.Language, "English"),
-		"side":     side,
-		"page":     page.Number,
-		"folio":    fmt.Sprintf("Place page number %d on the %s outer footer edge.", page.Number, outer),
+		"header": copy.Header,
+		"footer": copy.Footer,
+		"side":   side,
+		"page":   page.Number,
+		"folio":  fmt.Sprintf("Place page number %d on the %s outer footer edge.", page.Number, outer),
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(page.Prompt), &decoded); err == nil {

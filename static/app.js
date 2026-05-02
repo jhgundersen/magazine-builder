@@ -1375,25 +1375,7 @@ async function renderPage(page, styleReference) {
   });
 }
 function finalRenderPrompt(page) {
-  const side = page.number % 2 === 0 ? "left-hand page" : "right-hand page";
-  const folioSide = page.number % 2 === 0 ? "left" : "right";
-  const renderPosition = {
-    page_number: page.number,
-    side,
-    language: ((lastPlan && lastPlan.style) || {}).language || "English",
-    issue: issueContext(),
-    footer_folio:
-      "Put page number " +
-      page.number +
-      " on the " +
-      folioSide +
-      " side in the footer.",
-  };
-  if (page.kind === "cover") {
-    renderPosition.cover_plan = lastPlan.coverPlan || {
-      lines: coverLinePages(),
-    };
-  }
+  if (page.kind === "poster") return fitPromptJSON(posterPromptFromPage(page));
   try {
     const prompt = JSON.parse(String(page.prompt || "{}"));
     delete prompt.source_prompt;
@@ -1404,7 +1386,7 @@ function finalRenderPrompt(page) {
     });
     prompt.style = {
       visual_brief: visualStyleBrief(page.kind || "content"),
-      creative_kit: creativeKitForPage(page.kind || "content"),
+      palette: ((prompt.style || {}).palette) || undefined,
     };
     const brand = brandAssetPrompt(page);
     if (brand) prompt.style.brand_assets = brand;
@@ -1417,13 +1399,50 @@ function finalRenderPrompt(page) {
         1300,
       );
     }
-    prompt.render_position = renderPosition;
+    if (page.kind === "cover") {
+      prompt.content = Object.assign({}, prompt.content || {}, {
+        cover_plan: (lastPlan && lastPlan.coverPlan) || { lines: coverLinePages() },
+      });
+    }
     return fitPromptJSON(prompt);
   } catch (_) {
-    const prompt = cleanPromptFromPage(page);
-    prompt.render_position = renderPosition;
-    return fitPromptJSON(prompt);
+    return fitPromptJSON(cleanPromptFromPage(page));
   }
+}
+function posterPromptFromPage(page) {
+  const style = (lastPlan && lastPlan.style) || {};
+  const article = page.article || {};
+  let parsed = {};
+  try { parsed = JSON.parse(page.prompt || "{}"); } catch (_) {}
+  const format =
+    (parsed.metadata && parsed.metadata.format) ||
+    "FORMAT: Portrait magazine page, aspect ratio 1240:1754 (about 1:1.414), full page visible edge to edge, no 9:16 crop.";
+  const imageDesc = compactClient(
+    (parsed.content && parsed.content.image_description) ||
+    article.body || page.body || page.title || "",
+    1200,
+  );
+  return {
+    task: "Create a full-page poster image for this print magazine. The entire page is one continuous image. No article layout, no multi-column body text, no headline block, no sidebar boxes, no pull quotes.",
+    metadata: {
+      publication: $("title").value || "Untitled Magazine",
+      page_role: "poster",
+      language: style.language || "English",
+      tone: style.tone || "editorial",
+      issue: issueContext(),
+      format,
+    },
+    style: {
+      visual_brief: visualStyleBrief("poster"),
+      palette: style.palette || undefined,
+      brand_assets: brandAssetPrompt(page) || undefined,
+    },
+    content: { image_description: imageDesc },
+    constraints: [
+      "pure full-page image — no columns, no headline, no sidebar boxes",
+      style.avoid ? "avoid " + style.avoid : "",
+    ].filter(Boolean),
+  };
 }
 function brandAssetsForRender(page) {
   if (!lastPlan || page.kind === "advert") return [];
@@ -1494,6 +1513,7 @@ function fitPromptJSON(prompt) {
   return JSON.stringify(prompt);
 }
 function cleanPromptFromPage(page) {
+  if (page.kind === "poster") return posterPromptFromPage(page);
   const style = (lastPlan && lastPlan.style) || {};
   const article = page.article || {};
   const body = article.body || page.body || "";
@@ -1515,6 +1535,7 @@ function cleanPromptFromPage(page) {
     },
     style: {
       visual_brief: visualStyleBrief(page.kind || "content"),
+      palette: ((lastPlan && lastPlan.style) || {}).palette || undefined,
       creative_kit: creativeKitForPage(page.kind || "content"),
       brand_assets: brandAssetPrompt(page) || undefined,
     },
@@ -1530,8 +1551,6 @@ function cleanPromptFromPage(page) {
         "headline, deck, byline/source if available, readable columns, image or comic illustration slots, article-specific image text, pull quote/sidebar where useful",
     },
     constraints: [
-      "full page visible",
-      "no crop",
       style.avoid ? "avoid " + style.avoid : "",
     ].filter(Boolean),
   };
@@ -1611,7 +1630,7 @@ function visualStyleBrief(kind) {
     "Typography: " + (style.typography || ""),
     "Palette: " + (style.color || ""),
     "Print treatment: " + (style.print || ""),
-    "Page furniture: repeat this exact system from the style JSON: same margins, column grid, running-header placement, footer rule, folio placement and image-text treatment.",
+    "Page furniture: fixed margins and column grid; running-header at the top; footer rule and folio at the outer bottom corner; uniform image-text treatment.",
     style.avoid ? "Avoid: " + style.avoid : "",
   ]
     .filter(Boolean)

@@ -183,11 +183,7 @@ func normalizedArticlePages(a article) int {
 }
 
 func articleImageTextNotes(a article) string {
-	notes := "If images or illustrations are used, write short article-specific image text from the supplied title/body/source. Do not use generic reusable image text. Write only the image text itself, without a label prefix."
-	if a.Source != "" {
-		notes += " Source context: " + compact(a.Source, 140) + "."
-	}
-	return notes
+	return "If images or illustrations are used, write short article-specific image text from the supplied title and body. Do not use generic reusable image text. Write only the image text itself, without a label prefix."
 }
 
 func cleanArticles(in []article) []article {
