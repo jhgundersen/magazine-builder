@@ -100,6 +100,46 @@ func compact(s string, max int) string {
 	return string(r[:max]) + "..."
 }
 
+func compactPromptText(s string, max int) string {
+	s = cleanText(s)
+	if max <= 0 || len([]rune(s)) <= max {
+		return s
+	}
+	r := []rune(s)
+	cut := sentenceCutIndex(r, max)
+	return strings.TrimSpace(string(r[:cut]))
+}
+
+func sentenceCutIndex(r []rune, max int) int {
+	if max > len(r) {
+		max = len(r)
+	}
+	const minUseful = 80
+	for i := max - 1; i >= 0; i-- {
+		switch r[i] {
+		case '.', '!', '?', ':', ';':
+			if i+1 >= minUseful || i+1 >= max/2 {
+				return i + 1
+			}
+		}
+	}
+	for i := max - 1; i >= 0; i-- {
+		if r[i] == ',' || r[i] == ')' || r[i] == ']' {
+			if i+1 >= minUseful || i+1 >= max/2 {
+				return i + 1
+			}
+		}
+	}
+	for i := max - 1; i >= 0; i-- {
+		if r[i] == ' ' || r[i] == '\n' || r[i] == '\t' {
+			if i >= minUseful || i >= max/2 {
+				return i
+			}
+		}
+	}
+	return max
+}
+
 func sampleLongText(s string, max int) string {
 	s = cleanText(s)
 	r := []rune(s)

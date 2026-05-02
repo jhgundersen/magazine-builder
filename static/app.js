@@ -1631,7 +1631,7 @@ function finalRenderPrompt(page) {
       delete prompt.layout.continuity;
     }
     if (prompt.content && prompt.content.brief_body) {
-      prompt.content.brief_body = compactClient(
+      prompt.content.brief_body = compactPromptTextClient(
         prompt.content.brief_body,
         1300,
       );
@@ -1745,7 +1745,10 @@ function fitPromptJSON(prompt) {
   let out = JSON.stringify(prompt);
   if (out.length <= 3800) return out;
   if (prompt.content && prompt.content.brief_body) {
-    prompt.content.brief_body = compactClient(prompt.content.brief_body, 900);
+    prompt.content.brief_body = compactPromptTextClient(
+      prompt.content.brief_body,
+      900,
+    );
   }
   out = JSON.stringify(prompt);
   if (out.length <= 3800) return out;
@@ -1787,7 +1790,7 @@ function cleanPromptFromPage(page) {
     },
     content: {
       title: page.title || article.title || "Untitled",
-      brief_body: compactClient(body, 1500),
+      brief_body: compactPromptTextClient(body, 1500),
       modules: pageModules(page),
     },
     layout: {
@@ -1802,6 +1805,34 @@ function compactClient(s, max) {
     .replace(/\s+/g, " ")
     .trim();
   return s.length > max ? s.slice(0, max).trim() + "..." : s;
+}
+function compactPromptTextClient(s, max) {
+  s = String(s || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (max <= 0 || s.length <= max) return s;
+  const cut = sentenceCutIndexClient(s, max);
+  return s.slice(0, cut).trim();
+}
+function sentenceCutIndexClient(s, max) {
+  max = Math.min(max, s.length);
+  const strong = ".!?:;";
+  const weak = ",)]";
+  const useful = 80;
+  for (let i = max - 1; i >= 0; i--) {
+    if (strong.includes(s[i]) && (i + 1 >= useful || i + 1 >= max / 2)) {
+      return i + 1;
+    }
+  }
+  for (let i = max - 1; i >= 0; i--) {
+    if (weak.includes(s[i]) && (i + 1 >= useful || i + 1 >= max / 2)) {
+      return i + 1;
+    }
+  }
+  for (let i = max - 1; i >= 0; i--) {
+    if (/\s/.test(s[i]) && (i >= useful || i >= max / 2)) return i;
+  }
+  return max;
 }
 function issueContext() {
   if (lastPlan && lastPlan.issue) {

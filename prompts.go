@@ -158,13 +158,13 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article,
 }
 
 func articlePrompt(n int, title string, style magazineStyle, modules, kind string, a article, part, totalParts int, issue issueContext) string {
-	bodyText := compact(a.Body, 800)
+	bodyText := compactPromptText(a.Body, 800)
 	seriesNote := ""
 	storyOverview := ""
 	layoutRequired := "headline, deck, byline/source if available, readable columns, image slots, article-specific image text, pull quote/sidebar where useful"
 
 	if totalParts > 1 {
-		storyOverview = compact(a.Body, 400)
+		storyOverview = compactPromptText(a.Body, 400)
 
 		idx := part - 1
 		if idx < len(a.Sections) && strings.TrimSpace(a.Sections[idx].ImageBrief) != "" {
@@ -177,7 +177,7 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 			if end > len(runes) || part == totalParts {
 				end = len(runes)
 			}
-			bodyText = compact(string(runes[start:end]), 400)
+			bodyText = compactPromptText(string(runes[start:end]), 400)
 		}
 
 		switch {
@@ -265,7 +265,7 @@ func posterPrompt(title string, style magazineStyle, userPrompt string, issue is
 		},
 		"style": posterStylePromptBlock(style),
 		"content": map[string]any{
-			"image_description": compact(userPrompt, 800),
+			"image_description": compactPromptText(userPrompt, 800),
 		},
 		"constraints": []string{
 			"one continuous edge-to-edge image; no article layout, no columns, no headline block, no sidebar boxes, no pull quotes",

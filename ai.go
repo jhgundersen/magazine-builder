@@ -76,12 +76,8 @@ func (s *server) generateIssueContext(ctx context.Context, req buildRequest, sty
 
 func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, style magazineStyle, issue issueContext) (creativeKit, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, backPage. Make departments and sidebars arrays of 18-24 unique short strings each. Make adverts and backPage arrays of 10-16 unique short strings each. Every string must describe one specific reusable page element, never a duplicate or near-duplicate. Do not include reusable image text or image-text labels in this issue-wide kit; image text must be derived from each article at page-render time. Prepare issue-wide generic page elements for a %s called %q. Match this style and tone: %s. Issue context: %s. Use that exact issue number/date/year when an element needs issue metadata; otherwise omit issue metadata. Do not invent a different issue number, year or date. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), issueContextLine(issue), articleList(req.Articles))
-	text, err := s.runDefapiText(ctx, prompt, 3000)
-	if err != nil {
-		return creativeKit{}, err
-	}
-	kit, err := decodeCreativeKit(text)
-	if err != nil {
+	var kit creativeKit
+	if err := s.runDefapiTextJSON(ctx, prompt, 7000, &kit); err != nil {
 		return creativeKit{}, err
 	}
 	return kit, nil

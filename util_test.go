@@ -16,6 +16,28 @@ func TestCompactTruncatesAtBoundary(t *testing.T) {
 	}
 }
 
+func TestCompactPromptTextStopsAtSentenceBoundaryWithoutEllipsis(t *testing.T) {
+	input := "First sentence is useful. Second sentence is also useful. Third sentence should be removed because it is too long."
+	got := compactPromptText(input, 70)
+	if got != "First sentence is useful. Second sentence is also useful." {
+		t.Fatalf("unexpected prompt text: %q", got)
+	}
+	if strings.Contains(got, "...") {
+		t.Fatalf("prompt text should not use ellipsis: %q", got)
+	}
+}
+
+func TestCompactPromptTextFallsBackToWordBoundaryWithoutEllipsis(t *testing.T) {
+	input := "abcdef ghijkl mnopqr stuvwx yz"
+	got := compactPromptText(input, 20)
+	if got != "abcdef ghijkl" {
+		t.Fatalf("unexpected prompt text: %q", got)
+	}
+	if strings.Contains(got, "...") {
+		t.Fatalf("prompt text should not use ellipsis: %q", got)
+	}
+}
+
 func TestSmartLimitImagePromptPreservesJSON(t *testing.T) {
 	brief := strings.Repeat("B", 500)
 	prompt := map[string]any{

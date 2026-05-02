@@ -120,7 +120,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.DefapiTextCmd, "defapi-text", "defapi", "defapi text command")
 	flag.StringVar(&cfg.DefapiTextCategory, "defapi-text-category", "text", "defapi text category")
 	flag.StringVar(&cfg.DefapiTextModel, "defapi-text-model", "claude", "defapi text model")
-	flag.DurationVar(&cfg.DefapiTextTimeout, "defapi-text-timeout", 90*time.Second, "defapi text timeout")
+	flag.DurationVar(&cfg.DefapiTextTimeout, "defapi-text-timeout", 5*time.Minute, "defapi text timeout")
 	flag.StringVar(&cfg.DefapiImageCmd, "defapi-image", "defapi", "defapi image command")
 	flag.StringVar(&cfg.DefapiImageCategory, "defapi-image-category", "image", "defapi image category")
 	flag.StringVar(&cfg.DefapiImageModel, "defapi-image-model", "gpt2", "defapi image model")
