@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -98,6 +99,33 @@ type coverLineItem struct {
 	Title string `json:"title"`
 	Label string `json:"label"`
 	Role  string `json:"role,omitempty"`
+}
+
+func (c *coverLineItem) UnmarshalJSON(data []byte) error {
+	type alias coverLineItem
+	var raw struct {
+		alias
+		Page json.RawMessage `json:"page"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = coverLineItem(raw.alias)
+	var i int
+	if err := json.Unmarshal(raw.Page, &i); err == nil {
+		c.Page = i
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw.Page, &s); err != nil {
+		return err
+	}
+	i, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return err
+	}
+	c.Page = i
+	return nil
 }
 
 type renderPageRequest struct {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -63,6 +64,33 @@ type issueContext struct {
 	Year   int    `json:"year"`
 	Date   string `json:"date"`
 	Label  string `json:"label"`
+}
+
+func (c *issueContext) UnmarshalJSON(data []byte) error {
+	type alias issueContext
+	var raw struct {
+		alias
+		Number json.RawMessage `json:"number"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = issueContext(raw.alias)
+	var i int
+	if err := json.Unmarshal(raw.Number, &i); err == nil {
+		c.Number = i
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw.Number, &s); err != nil {
+		return err
+	}
+	i, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return err
+	}
+	c.Number = i
+	return nil
 }
 
 func newIssueContext(now time.Time) issueContext {
