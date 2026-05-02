@@ -26,7 +26,7 @@ func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath s
 	if err != nil {
 		return magazineStyle{}, err
 	}
-	prompt := "Return only valid compact JSON. No markdown, no prose. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, articleLength, typography, color, print, avoid. Keep every value under 220 characters. name must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". Use this compact brief as the source of truth. Preserve strong formats such as comics, satire, tabloids, puzzles or parody; do not normalize them into a generic magazine. Make articleLength practical for article rewrite prompts.\n\nBRIEF JSON:\n" + compactJSON(brief)
+	prompt := "Return only valid compact JSON. No markdown, no prose. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, articleLength, typography, color, print, avoid, palette. Keep every string value under 220 characters. name must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". Use this compact brief as the source of truth. Preserve strong formats such as comics, satire, tabloids, puzzles or parody; do not normalize them into a generic magazine. Make articleLength practical for article rewrite prompts. The palette key must be a JSON object with exactly five keys: primary, secondary, accent, background, text — each a CSS hex color string (e.g. \"#1a2b3c\") that reflects the publication's visual identity derived from the style brief.\n\nBRIEF JSON:\n" + compactJSON(brief)
 	if referencePath != "" {
 		prompt += "\n\nReference image URL: " + referencePath + "\nUse it only as visual inspiration for palette, typography mood, texture and layout feeling."
 	}
@@ -89,28 +89,28 @@ func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, styl
 
 func (s *server) generateBrandAssets(ctx context.Context, workspace string, req buildRequest, style magazineStyle, issue issueContext) ([]brandAsset, error) {
 	title := emptyDefault(req.Title, emptyDefault(style.Name, "Untitled Magazine"))
+	issueLabel := fmt.Sprintf("No. %d", issue.Number)
 	prompt := imagePromptJSON(map[string]any{
 		"task": "Create one clean unlabeled magazine brand asset board.",
 		"metadata": map[string]any{
 			"publication": title,
 			"language":    emptyDefault(style.Language, "English"),
 			"tone":        emptyDefault(style.Tone, "editorial"),
-			"issue":       issue,
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, "cover"),
 		},
 		"content": map[string]any{
 			"assets_to_draw": []string{
-				"large cover masthead using only the publication name",
-				"small horizontal running-header wordmark using only the publication name",
-				"simple issue seal or bug using only the supplied issue number/date/year",
-				"one divider/rule motif and one small folio mark with no explanatory text",
+				"large cover masthead — publication name only, in the publication's headline typeface",
+				"small horizontal running-header wordmark — publication name only, compact, for page headers",
+				fmt.Sprintf("small issue number mark — draw only %q, no date or year", issueLabel),
+				"one horizontal rule or divider motif consistent with the typography",
 			},
-			"layout": "single flat asset board on a plain light background, generous whitespace between assets, no mockup pages, no article photos",
-			"text":   "Only draw text that is part of the actual brand asset: publication name, issue number, issue date, issue year. Do not add labels, headings, captions, annotations, arrows, callouts, descriptions, filenames, element names or explanatory text.",
+			"layout": "single flat asset board on a plain light background, generous whitespace between each asset, left-aligned, no mockup pages, no article photos",
+			"text":   "Only draw text that is literally part of the asset itself: the publication name in the masthead/wordmark, the issue label in the number mark. Do not add any other labels, captions, annotations, arrows, headings or explanatory text.",
 		},
-		"constraints": []string{"unlabeled asset board", "simple vector-like marks", "high contrast", "print magazine identity system", "no labels such as logo, masthead, wordmark, seal, divider or folio", "avoid " + style.Avoid},
+		"constraints": []string{"unlabeled board except for the asset text itself", "simple clean marks", "high contrast", "print magazine identity system", "avoid " + style.Avoid},
 	})
 	image, err := s.runDefapiImageWithRetry(ctx, workspace, 0, prompt, nil)
 	if err != nil {
@@ -118,7 +118,7 @@ func (s *server) generateBrandAssets(ctx context.Context, workspace string, req 
 	}
 	return []brandAsset{{
 		Kind:      "brand-sheet",
-		Label:     "Logo, header wordmark, issue seal and folio marks",
+		Label:     "Masthead, running-header wordmark, issue number mark, divider and color palette",
 		Image:     image.Image,
 		PublicURL: image.PublicURL,
 		Prompt:    prompt,
@@ -322,7 +322,7 @@ func (s *server) generateCoverPlan(ctx context.Context, title string, style maga
 }
 
 func (s *server) generatePageFurniture(ctx context.Context, style magazineStyle, page pagePlan, issue issueContext) (pageFurniture, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys header and footer. Write very short localized magazine page furniture in %s. Tone: %s. Header: 1-5 words suitable for a running header or section slug for this page. Footer: 1-6 words that can sit beside page number %d. Issue context: %s. If header/footer includes issue metadata, use exactly that number/date/year; otherwise omit issue metadata. Do not invent a different issue number, year or date. Use the article/page content, do not repeat a long headline. Match this publication style: %s.\n\nPAGE KIND: %s\nPAGE TITLE: %s\nPAGE BODY: %s", emptyDefault(style.Language, "English"), emptyDefault(style.Tone, "editorial"), page.Number, issueContextLine(issue), styleLine(style, page.Kind), page.Kind, page.Title, pageBodyForFurniture(page))
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys header and footer. Write very short localized magazine page furniture in %s. Tone: %s.\n\nHeader: a section or department slug, 2-4 words maximum — e.g. \"Features\", \"Interview\", \"In Brief\", or the equivalent in the publication language. The header is a section label, never issue metadata.\n\nFooter: 2-5 words to sit beside the page number — typically the publication name or a short section label. Never repeat the year, issue number, or date in the footer unless the publication style explicitly uses issue info in footers.\n\nUse the page kind and article title to pick an appropriate section slug. Match this publication style: %s.\n\nPAGE KIND: %s\nPAGE TITLE: %s\nPAGE BODY: %s", emptyDefault(style.Language, "English"), emptyDefault(style.Tone, "editorial"), styleLine(style, page.Kind), page.Kind, page.Title, pageBodyForFurniture(page))
 	var out pageFurniture
 	if err := s.runDefapiTextJSON(ctx, prompt, 2000, &out); err != nil {
 		return pageFurniture{}, err

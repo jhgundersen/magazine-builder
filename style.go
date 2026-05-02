@@ -7,23 +7,32 @@ import (
 	"time"
 )
 
+type colorPalette struct {
+	Primary    string `json:"primary"`
+	Secondary  string `json:"secondary"`
+	Accent     string `json:"accent"`
+	Background string `json:"background"`
+	Text       string `json:"text"`
+}
+
 type magazineStyle struct {
-	Name          string `json:"name"`
-	Language      string `json:"language"`
-	Tone          string `json:"tone"`
-	Core          string `json:"core"`
-	Cover         string `json:"cover"`
-	Content       string `json:"content"`
-	Feature       string `json:"feature"`
-	Short         string `json:"short"`
-	Advert        string `json:"advert"`
-	Filler        string `json:"filler"`
-	Back          string `json:"back"`
-	ArticleLength string `json:"articleLength"`
-	Typography    string `json:"typography"`
-	Color         string `json:"color"`
-	Print         string `json:"print"`
-	Avoid         string `json:"avoid"`
+	Name          string       `json:"name"`
+	Language      string       `json:"language"`
+	Tone          string       `json:"tone"`
+	Core          string       `json:"core"`
+	Cover         string       `json:"cover"`
+	Content       string       `json:"content"`
+	Feature       string       `json:"feature"`
+	Short         string       `json:"short"`
+	Advert        string       `json:"advert"`
+	Filler        string       `json:"filler"`
+	Back          string       `json:"back"`
+	ArticleLength string       `json:"articleLength"`
+	Typography    string       `json:"typography"`
+	Color         string       `json:"color"`
+	Print         string       `json:"print"`
+	Avoid         string       `json:"avoid"`
+	Palette       colorPalette `json:"palette"`
 }
 
 type styleBrief struct {
@@ -175,6 +184,9 @@ func normalizeStyle(style magazineStyle) magazineStyle {
 	if style.Avoid == "" {
 		style.Avoid = fallback.Avoid
 	}
+	if style.Palette.Primary == "" {
+		style.Palette = fallback.Palette
+	}
 	return style
 }
 
@@ -200,6 +212,13 @@ func fallbackStyle(style, referencePath string) magazineStyle {
 		Color:         "limited coherent palette with one warm and one cool accent",
 		Print:         "tactile paper, realistic print texture",
 		Avoid:         "generic web UI, floating app cards, unreadable logo, mismatched styles, real brands unless provided",
+		Palette: colorPalette{
+			Primary:    "#1c2340",
+			Secondary:  "#c9a96e",
+			Accent:     "#c0392b",
+			Background: "#f8f5f0",
+			Text:       "#1a1a1a",
+		},
 	}
 	lower := strings.ToLower(base)
 	if strings.Contains(lower, "tegneserie") || strings.Contains(lower, "norsk") || strings.Contains(lower, "guttetur") || strings.Contains(lower, "skogen") {
@@ -216,6 +235,13 @@ func fallbackStyle(style, referencePath string) magazineStyle {
 		out.Typography = "bold comic masthead, hand-lettered accents, readable compact body, loud section labels"
 		out.Color = "high-contrast comic palette with warm paper, harsh black ink and one loud accent color"
 		out.Avoid = "generic web UI, respectable corporate magazine tone, long essay prose, unreadable logo, real brands unless provided"
+		out.Palette = colorPalette{
+			Primary:    "#1a1a1a",
+			Secondary:  "#f5e6c8",
+			Accent:     "#e63946",
+			Background: "#fdf6e3",
+			Text:       "#1a1a1a",
+		}
 	}
 	return out
 }

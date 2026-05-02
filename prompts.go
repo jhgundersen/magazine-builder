@@ -137,6 +137,7 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article,
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, "cover"),
+			"palette":      style.Palette,
 		},
 		"content": map[string]any{
 			"masthead":     title,
@@ -214,6 +215,7 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, kind),
+			"palette":      style.Palette,
 		},
 		"content": content,
 		"layout": map[string]any{
@@ -236,6 +238,7 @@ func genericPrompt(n int, title string, style magazineStyle, modules, kind, task
 		},
 		"style": map[string]any{
 			"visual_brief": imageStyleBrief(style, kind),
+			"palette":      style.Palette,
 		},
 		"content": map[string]any{
 			"module_ideas": modules,
