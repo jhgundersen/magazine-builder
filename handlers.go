@@ -57,6 +57,15 @@ type buildRequest struct {
 	ImageModel   string    `json:"imageModel"`
 }
 
+type brandAssetsRequest struct {
+	Title      string        `json:"title"`
+	Style      magazineStyle `json:"style"`
+	Issue      issueContext  `json:"issue"`
+	Workspace  string        `json:"workspace"`
+	APIKey     string        `json:"apiKey"`
+	ImageModel string        `json:"imageModel"`
+}
+
 type buildResponse struct {
 	Style       magazineStyle `json:"style"`
 	CreativeKit creativeKit   `json:"creativeKit"`
@@ -366,12 +375,79 @@ func (s *server) runGenerateArticlesTask(db *sql.DB, workspace, taskID string, r
 		}
 	}()
 	style := parseStyle(req.Style)
+	s.workspaceLog(workspace, "generate-articles: start title=%q count=%d", req.Title, req.Count)
+	s.workspaceLogJSON(workspace, "generate-articles: style JSON", style)
 	articles, err := s.generateArticles(ctx, req.Title, style, req.Count)
 	if err != nil {
+		s.workspaceLog(workspace, "generate-articles: failed: %v", err)
 		taskErr = err
 		return
 	}
+	s.workspaceLogJSON(workspace, "generate-articles: articles", articleLogEntries(articles, true))
+	s.workspaceLog(workspace, "generate-articles: complete articles=%d", len(articles))
 	taskErr = completeTask(db, taskID, taskJSONOutput(map[string]any{"articles": articles, "workspace": workspace}))
+}
+
+func (s *server) handleBrandAssets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req brandAssetsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	workspace, err := s.ensureWorkspace(req.Workspace, req.Title)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Workspace = workspace
+	db, err := s.openWorkspaceDB(workspace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	taskID := newTaskID()
+	if err := createTask(db, "brand-assets", taskID, taskJSONOutput(req)); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	go s.runBrandAssetsTask(db, workspace, taskID, req)
+	writeJSON(w, map[string]string{"taskId": taskID, "workspace": workspace})
+}
+
+func (s *server) runBrandAssetsTask(db *sql.DB, workspace, taskID string, req brandAssetsRequest) {
+	ctx := context.Background()
+	ctx = contextWithModels(contextWithAPIKey(ctx, req.APIKey), "", req.ImageModel)
+	ctx = contextWithWorkspace(ctx, workspace)
+	if err := startTask(db, taskID); err != nil {
+		log.Printf("runBrandAssetsTask startTask: %v", err)
+	}
+	var taskErr error
+	defer func() {
+		if r := recover(); r != nil {
+			taskErr = fmt.Errorf("panic: %v", r)
+		}
+		if taskErr != nil {
+			taskLogErr("runBrandAssetsTask failTask", failTask(db, taskID, taskErr.Error()))
+		}
+	}()
+	req.Issue = normalizeIssueContext(req.Issue, time.Now())
+	if req.Title != "" {
+		req.Style.Name = req.Title
+	}
+	s.workspaceLog(workspace, "brand-assets: regenerate start title=%q issue=%s", req.Title, issueContextLine(req.Issue))
+	assets, err := s.generateBrandAssets(ctx, workspace, buildRequest{Title: req.Title}, req.Style, req.Issue)
+	if err != nil {
+		s.workspaceLog(workspace, "brand-assets: regenerate failed: %v", err)
+		taskErr = err
+		return
+	}
+	s.workspaceLogJSON(workspace, "brand-assets: regenerated JSON", assets)
+	s.workspaceLog(workspace, "brand-assets: regenerate complete assets=%d", len(assets))
+	taskErr = completeTask(db, taskID, taskJSONOutput(map[string]any{"brandAssets": assets, "workspace": workspace}))
 }
 
 func (s *server) handleBuild(w http.ResponseWriter, r *http.Request) {

@@ -142,8 +142,11 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article,
 			"issue":            issue,
 		},
 		"style": map[string]any{
-			"visual_brief": imageStyleBrief(style, "cover"),
-			"palette":      style.Palette,
+			"visual_system":   compact(strings.Join(filterStrings([]string{style.Core, style.Content}), " "), 700),
+			"page_notes":      styleLineSpecific(style, "cover"),
+			"typography":      style.Typography,
+			"print_treatment": style.Print,
+			"palette":         style.Palette,
 		},
 		"content": map[string]any{
 			"masthead":     title,
@@ -191,10 +194,9 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 	}
 
 	content := map[string]any{
-		"title":            a.Title,
-		"brief_body":       bodyText,
-		"modules":          modules,
-		"image_text_notes": articleImageTextNotes(a),
+		"title":      a.Title,
+		"brief_body": bodyText,
+		"modules":    modules,
 	}
 	if seriesNote != "" {
 		content["series_note"] = seriesNote
@@ -221,10 +223,7 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 			"tone":        emptyDefault(style.Tone, "editorial"),
 			"issue":       issue,
 		},
-		"style": map[string]any{
-			"visual_brief": imageStyleBrief(style, kind),
-			"palette":      style.Palette,
-		},
+		"style":   stylePromptBlock(style, kind),
 		"content": content,
 		"layout": map[string]any{
 			"required_elements": layoutRequired,
@@ -244,10 +243,7 @@ func genericPrompt(n int, title string, style magazineStyle, modules, kind, task
 			"tone":        emptyDefault(style.Tone, "editorial"),
 			"issue":       issue,
 		},
-		"style": map[string]any{
-			"visual_brief": imageStyleBrief(style, kind),
-			"palette":      style.Palette,
-		},
+		"style": stylePromptBlock(style, kind),
 		"content": map[string]any{
 			"module_ideas": modules,
 		},
@@ -257,42 +253,45 @@ func genericPrompt(n int, title string, style magazineStyle, modules, kind, task
 
 func posterPrompt(title string, style magazineStyle, userPrompt string, issue issueContext) string {
 	return imagePromptJSON(map[string]any{
-		"task": "Create a full-page poster for a print magazine.",
+		"task": "Create an interior full-page poster image for this print magazine. This is not the front cover.",
 		"metadata": map[string]any{
 			"publication": title,
 			"page_role":   "poster",
+			"placement":   "inside page, not cover",
 			"language":    emptyDefault(style.Language, "English"),
 			"format":      pageFormatInstruction(),
 			"tone":        emptyDefault(style.Tone, "editorial"),
 			"issue":       issue,
 		},
-		"style": map[string]any{
-			"visual_brief": imageStyleBrief(style, "poster"),
-			"palette":      style.Palette,
-		},
+		"style": posterStylePromptBlock(style),
 		"content": map[string]any{
 			"image_description": compact(userPrompt, 800),
 		},
 		"constraints": []string{
-			"pure image composition — no headline, no byline, no body text columns",
-			"a small title or short caption is acceptable only if it strongly enhances the composition",
+			"one continuous edge-to-edge image; no article layout, no columns, no headline block, no sidebar boxes, no pull quotes",
+			"do not create a cover: no masthead, no cover lines, no barcode, no price, no issue seal, no date, no front-page furniture",
+			"no running header, footer, folio, page number, wordmark or brand asset",
+			"small lettering is acceptable only if it is naturally part of the poster image itself",
 			"avoid " + style.Avoid,
 		},
 	})
 }
 
-func imageStyleBrief(style magazineStyle, kind string) string {
-	return compact(strings.Join([]string{
-		"Self-contained visual system for this page:",
-		style.Core,
-		style.Content,
-		styleLineSpecific(style, kind),
-		"Typography: " + style.Typography,
-		"Palette: " + style.Color,
-		"Print treatment: " + style.Print,
-		"Page furniture: fixed margins and column grid; running-header at the top; footer rule and folio at the outer bottom corner; uniform image-text treatment.",
-		"Avoid: " + style.Avoid,
-	}, " "), 1200)
+func stylePromptBlock(style magazineStyle, kind string) map[string]any {
+	return map[string]any{
+		"visual_system":   compact(strings.Join(filterStrings([]string{style.Core, style.Content}), " "), 700),
+		"page_notes":      styleLineSpecific(style, kind),
+		"typography":      style.Typography,
+		"print_treatment": style.Print,
+		"palette":         style.Palette,
+	}
+}
+
+func posterStylePromptBlock(style magazineStyle) map[string]any {
+	block := stylePromptBlock(style, "poster")
+	block["placement"] = "interior poster page"
+	block["layout_exclusions"] = []string{"magazine furniture", "article grid", "masthead", "cover composition"}
+	return block
 }
 
 func imagePromptJSON(v map[string]any) string {

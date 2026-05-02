@@ -36,20 +36,20 @@ func randomHex(n int) string {
 }
 
 var (
-	tagRE                = regexp.MustCompile(`<[^>]+>`)
-	spaceRE              = regexp.MustCompile(`\s+`)
-	imageRE              = regexp.MustCompile(`(?is)<img[^>]+(?:src|data-src|data-original)=["']([^"']+)["']`)
-	srcsetRE             = regexp.MustCompile(`(?is)<img[^>]+srcset=["']([^"']+)["']`)
-	removableBlockRE     = regexp.MustCompile(`(?is)<(?:script|style|noscript|svg|iframe|object|embed|form|nav|footer|aside)[^>]*>.*?</(?:script|style|noscript|svg|iframe|object|embed|form|nav|footer|aside)>`)
-	commentRE            = regexp.MustCompile(`(?is)<!--.*?-->`)
-	linkRE               = regexp.MustCompile(`(?is)<a\b[^>]*>(.*?)</a>`)
-	urlTextRE            = regexp.MustCompile(`https?://\S+`)
-	likelyArticleRE      = regexp.MustCompile(`(?is)<(?:article|main)\b[^>]*>(.*?)</(?:article|main)>`)
-	contentBlockRE       = regexp.MustCompile(`(?is)<(?:div|section)\b[^>]*(?:class|id)=["'][^"']*(?:article|post|entry|content|story|body|main)[^"']*["'][^>]*>(.*?)</(?:div|section)>`)
-	paragraphRE          = regexp.MustCompile(`(?is)<p\b[^>]*>.*?</p>`)
-	titleRE              = regexp.MustCompile(`(?is)<h1\b[^>]*>(.*?)</h1>`)
+	tagRE                 = regexp.MustCompile(`<[^>]+>`)
+	spaceRE               = regexp.MustCompile(`\s+`)
+	imgTagRE              = regexp.MustCompile(`(?is)<img\b[^>]*>`)
+	attrRE                = regexp.MustCompile(`(?is)\s([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*["']([^"']*)["']`)
+	removableBlockRE      = regexp.MustCompile(`(?is)<(?:script|style|noscript|svg|iframe|object|embed|form|nav|footer|aside)[^>]*>.*?</(?:script|style|noscript|svg|iframe|object|embed|form|nav|footer|aside)>`)
+	commentRE             = regexp.MustCompile(`(?is)<!--.*?-->`)
+	linkRE                = regexp.MustCompile(`(?is)<a\b[^>]*>(.*?)</a>`)
+	urlTextRE             = regexp.MustCompile(`https?://\S+`)
+	likelyArticleRE       = regexp.MustCompile(`(?is)<(?:article|main)\b[^>]*>(.*?)</(?:article|main)>`)
+	contentBlockRE        = regexp.MustCompile(`(?is)<(?:div|section)\b[^>]*(?:class|id)=["'][^"']*(?:article|post|entry|content|story|body|main)[^"']*["'][^>]*>(.*?)</(?:div|section)>`)
+	paragraphRE           = regexp.MustCompile(`(?is)<p\b[^>]*>.*?</p>`)
+	titleRE               = regexp.MustCompile(`(?is)<h1\b[^>]*>(.*?)</h1>`)
 	transcriptTimestampRE = regexp.MustCompile(`^\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?`)
-	transcriptCueRE      = regexp.MustCompile(`^\d+$`)
+	transcriptCueRE       = regexp.MustCompile(`^\d+$`)
 )
 
 func stripHTML(s string) string { return tagRE.ReplaceAllString(s, " ") }
@@ -127,7 +127,8 @@ func limitPrompt(s string, max int) string {
 }
 
 // smartLimitImagePrompt reduces the image prompt to max runes, preferring to
-// trim verbose JSON fields (style.visual_brief, style.creative_kit) before
+// trim verbose JSON fields (style.visual_system, style.visual_brief,
+// style.creative_kit) before
 // falling back to a hard rune cut.
 func smartLimitImagePrompt(s string, max int) string {
 	s = strings.TrimSpace(s)
@@ -137,7 +138,7 @@ func smartLimitImagePrompt(s string, max int) string {
 	var m map[string]any
 	if json.Unmarshal([]byte(s), &m) == nil {
 		style, _ := m["style"].(map[string]any)
-		for _, field := range []string{"visual_brief", "creative_kit"} {
+		for _, field := range []string{"visual_system", "visual_brief", "creative_kit"} {
 			if style == nil {
 				break
 			}

@@ -97,9 +97,7 @@ func (s *server) generateBrandAssets(ctx context.Context, workspace string, req 
 			"language":    emptyDefault(style.Language, "English"),
 			"tone":        emptyDefault(style.Tone, "editorial"),
 		},
-		"style": map[string]any{
-			"visual_brief": imageStyleBrief(style, "cover"),
-		},
+		"style": stylePromptBlock(style, "cover"),
 		"content": map[string]any{
 			"assets_to_draw": []string{
 				"large cover masthead — publication name only, in the publication's headline typeface",
@@ -276,15 +274,15 @@ func (s *server) summarizePodcastForImport(ctx context.Context, a article, style
 }
 
 func (s *server) generateArticles(ctx context.Context, title string, style magazineStyle, count int) ([]article, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of exactly %d objects. Each object must have title and body. Generate original fictional-but-plausible magazine articles that fit this publication. Do not use real copyrighted brands unless generic/current facts are unavoidable. Vary article types: one feature, one short news item, one practical/service piece, one opinion/interview/list if count allows. Body length 900-1500 characters each, ready for print layout.\n\nPUBLICATION: %s\nSTYLE: %s", count, emptyDefault(title, "Untitled Magazine"), styleLine(style, "article"))
-	text, err := s.runDefapiText(ctx, prompt, 4000)
-	if err != nil {
-		return nil, err
-	}
 	var out struct {
 		Articles []article `json:"articles"`
 	}
-	if err := json.Unmarshal([]byte(extractJSONObject(text)), &out); err != nil {
+	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of exactly %d objects. Each object must have title and body. Generate original fictional-but-plausible magazine articles that fit this publication. Do not use real copyrighted brands unless generic/current facts are unavoidable. Vary article types: one feature, one short news item, one practical/service piece, one opinion/interview/list if count allows. Body length 900-1500 characters each, ready for print layout.\n\nPUBLICATION: %s\nSTYLE: %s", count, emptyDefault(title, "Untitled Magazine"), styleLine(style, "article"))
+	maxTokens := max(7000, count*2200)
+	if maxTokens > 12000 {
+		maxTokens = 12000
+	}
+	if err := s.runDefapiTextJSON(ctx, prompt, maxTokens, &out); err != nil {
 		return nil, err
 	}
 	cleaned := cleanArticles(out.Articles)
@@ -293,6 +291,9 @@ func (s *server) generateArticles(ctx context.Context, title string, style magaz
 	}
 	if len(cleaned) > count {
 		cleaned = cleaned[:count]
+	}
+	if len(cleaned) == 0 {
+		return nil, errors.New("defapi text returned no usable generated articles")
 	}
 	return cleaned, nil
 }
@@ -356,11 +357,11 @@ func (s *server) pagePromptWithFurniture(ctx context.Context, style magazineStyl
 	side := pageSide(page.Number)
 	outer := pageNumberSide(page.Number)
 	payload := map[string]any{
-		"header": copy.Header,
-		"footer": copy.Footer,
-		"side":   side,
-		"page":   page.Number,
-		"folio":  fmt.Sprintf("Place page number %d on the %s outer footer edge.", page.Number, outer),
+		"header":         copy.Header,
+		"footer":         copy.Footer,
+		"side":           side,
+		"page":           page.Number,
+		"folio_position": fmt.Sprintf("%s outer footer edge", outer),
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(page.Prompt), &decoded); err == nil {
@@ -518,7 +519,7 @@ func defapiImageRef(imageRef string) string {
 }
 
 func brandAssetRefsForPage(page pagePlan, assets []brandAsset) []string {
-	if page.Kind == "advert" {
+	if page.Kind == "advert" || page.Kind == "poster" {
 		return nil
 	}
 	refs := []string{}

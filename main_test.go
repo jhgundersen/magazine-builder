@@ -80,6 +80,23 @@ func TestReleaseAssetName(t *testing.T) {
 	}
 }
 
+func TestComparableVersionNormalizesDirtyBuilds(t *testing.T) {
+	cases := map[string]string{
+		"v1.2.0":             "v1.2.0",
+		"v1.2.0-dirty":       "v1.2.0",
+		"v1.2.0+local":       "v1.2.0",
+		"v1.2.0-dirty+local": "v1.2.0",
+		"abc123-dirty":       "abc123",
+		"dev":                "dev",
+		"  v1.2.0-dirty  ":   "v1.2.0",
+	}
+	for in, want := range cases {
+		if got := comparableVersion(in); got != want {
+			t.Fatalf("comparableVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestExtractLikelyArticleRemovesEmbedsLinksAndFindsImages(t *testing.T) {
 	html := `<html><body>
 <nav>menu noise</nav>
@@ -105,8 +122,32 @@ func TestExtractLikelyArticleRemovesEmbedsLinksAndFindsImages(t *testing.T) {
 		t.Fatalf("body missed article text: %s", extracted.Body)
 	}
 	images := extractImageURLs(extracted.Markup, "https://example.com/posts/story")
-	if len(images) != 2 || images[0] != "https://example.com/image.jpg" || images[1] != "https://example.com/large.jpg" {
+	if len(images) != 3 || images[0] != "https://example.com/large.jpg" || images[1] != "https://example.com/small.jpg" || images[2] != "https://example.com/image.jpg" {
 		t.Fatalf("unexpected images: %#v", images)
+	}
+}
+
+func TestExtractImageURLsRanksLargestBeforeLimit(t *testing.T) {
+	html := `<article>
+<img src="/thumb.jpg" width="120" height="80">
+<img src="/medium.jpg" width="800" height="500">
+<img srcset="/small.jpg 320w, /huge.jpg 1800w, /large.jpg 1200w">
+<img src="/full.jpg" width="1600" height="1000">
+</article>`
+	images := extractImageURLs(html, "https://example.com/posts/story")
+	got := limitStrings(images, 3)
+	want := []string{
+		"https://example.com/huge.jpg",
+		"https://example.com/full.jpg",
+		"https://example.com/large.jpg",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d images, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("image %d = %q, want %q; all images %#v", i, got[i], want[i], images)
+		}
 	}
 }
 

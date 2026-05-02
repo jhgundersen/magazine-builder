@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -56,7 +57,8 @@ func runUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if tag == version {
+	current := comparableVersion(version)
+	if current != "" && tag == current {
 		fmt.Printf("Already up to date (%s)\n", version)
 		return nil
 	}
@@ -67,6 +69,20 @@ func runUpdate(args []string) error {
 	}
 	fmt.Printf("Updated to %s — restart to apply\n", tag)
 	return nil
+}
+
+func comparableVersion(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "dev" {
+		return v
+	}
+	if i := strings.IndexAny(v, "+ "); i >= 0 {
+		v = v[:i]
+	}
+	for _, suffix := range []string{"-dirty"} {
+		v = strings.TrimSuffix(v, suffix)
+	}
+	return v
 }
 
 func releaseAssetName(goos, goarch string) (string, error) {

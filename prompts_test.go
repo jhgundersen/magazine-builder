@@ -107,6 +107,73 @@ func TestStyleLineContainsExpectedFields(t *testing.T) {
 	}
 }
 
+func TestArticlePromptUsesStructuredStyleWithoutNoisyDuplicates(t *testing.T) {
+	style := magazineStyle{
+		Language:   "Norwegian",
+		Tone:       "playful",
+		Core:       "retro arcade pinup",
+		Content:    "busy magazine pages",
+		Short:      "short page notes",
+		Typography: "bold pixel type",
+		Color:      "red and yellow arcade palette",
+		Print:      "glossy paper",
+		Avoid:      "generic layouts",
+		Palette:    colorPalette{Primary: "#e8003d", Secondary: "#1a1a2e", Accent: "#f5c518", Background: "#fff8f0", Text: "#1a1a1a"},
+	}
+	issue := issueContext{Number: 23, Year: 1994, Date: "1994-06-01", Label: "Nr. 23, juni 1994"}
+	prompt := articlePrompt(5, "Leken spillhistorie", style, "numbers to know", "article", article{Title: "FAST TRACKER", Body: "Kort brødtekst."}, 1, 1, issue)
+	lower := strings.ToLower(prompt)
+
+	for _, forbidden := range []string{"visual_brief", "image_text_notes", "typography:", "palette:", "page furniture: fixed margins", "avoid:"} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("article prompt should not contain %q: %s", forbidden, prompt)
+		}
+	}
+	for _, want := range []string{"visual_system", "page_notes", "typography", "print_treatment", "palette", "avoid generic layouts"} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("article prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
+func TestPosterPromptIsInteriorPosterNotCover(t *testing.T) {
+	style := magazineStyle{
+		Language:   "Norwegian",
+		Tone:       "playful",
+		Core:       "retro arcade pinup",
+		Content:    "busy magazine pages",
+		Feature:    "large feature image",
+		Typography: "bold pixel type",
+		Color:      "red and yellow arcade palette",
+		Print:      "glossy paper",
+		Avoid:      "generic layouts",
+	}
+	issue := issueContext{Number: 23, Year: 1994, Date: "1994-06-01", Label: "Nr. 23, juni 1994"}
+	prompt := posterPrompt("Leken spillhistorie", style, "En pikselert figur fra 90-talls dataspill", issue)
+	lower := strings.ToLower(prompt)
+
+	for _, want := range []string{"interior full-page poster", "not the front cover", "inside page, not cover", "no masthead", "no cover lines", "no running header"} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("poster prompt missing %q: %s", want, prompt)
+		}
+	}
+	for _, forbidden := range []string{"page furniture: fixed margins", "running-header at the top", "footer rule and folio", "brand_assets"} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("poster prompt should not contain %q: %s", forbidden, prompt)
+		}
+	}
+}
+
+func TestBrandAssetRefsSkipPosterPages(t *testing.T) {
+	assets := []brandAsset{{PublicURL: "https://example.com/brand.jpg"}}
+	if got := brandAssetRefsForPage(pagePlan{Kind: "poster"}, assets); len(got) != 0 {
+		t.Fatalf("poster should not receive brand assets, got %#v", got)
+	}
+	if got := brandAssetRefsForPage(pagePlan{Kind: "article"}, assets); len(got) != 1 {
+		t.Fatalf("article should receive one brand asset, got %#v", got)
+	}
+}
+
 func pageKinds(pages []pagePlan) []string {
 	kinds := make([]string, len(pages))
 	for i, p := range pages {

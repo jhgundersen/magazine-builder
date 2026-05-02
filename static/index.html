@@ -38,7 +38,11 @@
         </div>
         <div id="workspaceLabel" class="workspace">No workspace yet</div>
         <div class="workspace-load">
-          <input id="workspaceInput" type="text" placeholder="Enter workspace ID to restore…" />
+          <input
+            id="workspaceInput"
+            type="text"
+            placeholder="Enter workspace ID to restore…"
+          />
           <button id="loadWorkspace" class="ghost">Load</button>
         </div>
         <button id="changeApiKey" class="ghost">API key</button>
@@ -145,6 +149,18 @@
                 articles are rewritten into the publication voice before
                 planning.
               </p>
+            </div>
+          </div>
+          <div id="styleJsonBox" class="hidden">
+            <div class="field">
+              <label
+                >Enhanced style JSON
+                <span style="font-weight: normal; opacity: 0.6"
+                  >(editable — changes auto-save)</span
+                ></label
+              >
+              <textarea id="styleJson" class="prompt style-json"></textarea>
+              <div id="styleJsonEditStatus" class="status"></div>
             </div>
           </div>
           <div class="article-tools">

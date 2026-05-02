@@ -100,6 +100,7 @@ func (s *server) routes() (http.Handler, error) {
 	mux.HandleFunc("/api/import-rss", s.handleImportRSS)
 	mux.HandleFunc("/api/generate-articles", s.handleGenerateArticles)
 	mux.HandleFunc("/api/build", s.handleBuild)
+	mux.HandleFunc("/api/brand-assets", s.handleBrandAssets)
 	mux.HandleFunc("/api/cover-plan", s.handleCoverPlan)
 	mux.HandleFunc("/api/render-page", s.handleRenderPage)
 	mux.HandleFunc("/api/write-pdf", s.handleWritePDF)

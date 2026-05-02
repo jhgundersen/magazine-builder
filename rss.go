@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -90,6 +91,12 @@ type extractedArticle struct {
 	Title  string
 	Body   string
 	Markup string
+}
+
+type imageCandidate struct {
+	URL   string
+	Score int
+	Order int
 }
 
 var fetchURLTextFunc = fetchURLText
@@ -406,27 +413,109 @@ func scoreArticleMarkup(markup string) int {
 
 func extractImageURLs(markup, base string) []string {
 	markup = cleanArticleHTML(markup)
-	matches := imageRE.FindAllStringSubmatch(markup, -1)
-	seen := map[string]bool{}
-	out := []string{}
-	for _, m := range matches {
-		u := resolveURL(base, strings.TrimSpace(m[1]))
-		if u == "" || seen[u] {
-			continue
+	seen := map[string]int{}
+	candidates := []imageCandidate{}
+	add := func(raw string, score int) {
+		u := resolveURL(base, strings.TrimSpace(raw))
+		if u == "" {
+			return
 		}
-		seen[u] = true
-		out = append(out, u)
-	}
-	for _, m := range srcsetRE.FindAllStringSubmatch(markup, -1) {
-		u := resolveURL(base, firstSrcsetURL(m[1]))
-		if u == "" || seen[u] {
-			continue
+		if i, ok := seen[u]; ok {
+			if score > candidates[i].Score {
+				candidates[i].Score = score
+			}
+			return
 		}
-		seen[u] = true
-		out = append(out, u)
+		seen[u] = len(candidates)
+		candidates = append(candidates, imageCandidate{URL: u, Score: score, Order: len(candidates)})
 	}
-	sort.Strings(out)
+
+	for _, tag := range imgTagRE.FindAllString(markup, -1) {
+		attrs := imageTagAttrs(tag)
+		score := imageAttrScore(attrs)
+		for _, name := range []string{"src", "data-src", "data-original"} {
+			if attrs[name] != "" {
+				add(attrs[name], score)
+				break
+			}
+		}
+		for _, candidate := range srcsetCandidates(attrs["srcset"]) {
+			candidate.Score = max(candidate.Score, score)
+			add(candidate.URL, candidate.Score)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score == candidates[j].Score {
+			return candidates[i].Order < candidates[j].Order
+		}
+		return candidates[i].Score > candidates[j].Score
+	})
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, candidate.URL)
+	}
 	return out
+}
+
+func imageTagAttrs(tag string) map[string]string {
+	attrs := map[string]string{}
+	for _, m := range attrRE.FindAllStringSubmatch(tag, -1) {
+		if len(m) > 2 {
+			attrs[strings.ToLower(m[1])] = strings.TrimSpace(m[2])
+		}
+	}
+	return attrs
+}
+
+func imageAttrScore(attrs map[string]string) int {
+	width := firstPositiveInt(attrs["width"], attrs["data-width"])
+	height := firstPositiveInt(attrs["height"], attrs["data-height"])
+	return max(width, height)
+}
+
+func srcsetCandidates(srcset string) []imageCandidate {
+	parts := strings.Split(srcset, ",")
+	out := make([]imageCandidate, 0, len(parts))
+	for i, part := range parts {
+		fields := strings.Fields(strings.TrimSpace(part))
+		if len(fields) == 0 {
+			continue
+		}
+		score := 0
+		if len(fields) > 1 {
+			score = srcsetDescriptorScore(fields[1])
+		}
+		out = append(out, imageCandidate{URL: fields[0], Score: score, Order: i})
+	}
+	return out
+}
+
+func srcsetDescriptorScore(desc string) int {
+	desc = strings.TrimSpace(strings.ToLower(desc))
+	if strings.HasSuffix(desc, "w") {
+		return firstPositiveInt(strings.TrimSuffix(desc, "w"))
+	}
+	if strings.HasSuffix(desc, "x") {
+		v, err := strconv.ParseFloat(strings.TrimSuffix(desc, "x"), 64)
+		if err == nil && v > 0 {
+			return int(v * 1000)
+		}
+	}
+	return 0
+}
+
+func firstPositiveInt(values ...string) int {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		n, err := strconv.Atoi(value)
+		if err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 func resolveURL(base, ref string) string {
@@ -449,13 +538,15 @@ func resolveURL(base, ref string) string {
 }
 
 func firstSrcsetURL(srcset string) string {
-	parts := strings.Split(srcset, ",")
-	if len(parts) == 0 {
+	candidates := srcsetCandidates(srcset)
+	if len(candidates) == 0 {
 		return ""
 	}
-	fields := strings.Fields(strings.TrimSpace(parts[0]))
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score == candidates[j].Score {
+			return candidates[i].Order < candidates[j].Order
+		}
+		return candidates[i].Score > candidates[j].Score
+	})
+	return candidates[0].URL
 }

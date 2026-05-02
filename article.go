@@ -182,10 +182,6 @@ func normalizedArticlePages(a article) int {
 	return a.Pages
 }
 
-func articleImageTextNotes(a article) string {
-	return "If images or illustrations are used, write short article-specific image text from the supplied title and body. Do not use generic reusable image text. Write only the image text itself, without a label prefix."
-}
-
 func cleanArticles(in []article) []article {
 	out := make([]article, 0, len(in))
 	for _, a := range in {

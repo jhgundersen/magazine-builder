@@ -72,7 +72,7 @@ func (s *server) autoUpdateLoop() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		tag, err := latestReleaseTag(ctx, repositoryName)
 		cancel()
-		if err == nil && tag != "" && tag != version {
+		if err == nil && tag != "" && tag != comparableVersion(version) {
 			log.Printf("auto-update: new version available: %s (running %s) — run 'magazine-builder update' to upgrade", tag, version)
 		}
 		time.Sleep(24 * time.Hour)

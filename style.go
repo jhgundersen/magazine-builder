@@ -331,8 +331,13 @@ func styleLineSpecific(style magazineStyle, kind string) string {
 	switch kind {
 	case "cover":
 		return style.Cover
-	case "feature", "poster":
+	case "feature":
 		return style.Feature
+	case "poster":
+		if strings.TrimSpace(style.Feature) != "" {
+			return "Interior poster image treatment: " + style.Feature
+		}
+		return style.Content
 	case "short", "article":
 		return style.Short
 	case "advert":

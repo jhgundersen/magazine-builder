@@ -38,8 +38,8 @@ Page planning and image prompt construction:
 - `pageFurniture` — header (section slug) + footer (pub name / short label).
 - `modulePlanner` — cycles through creative kit pools without repeating within a kind.
 - `planMagazine` — assembles the full page plan from a build request. Handles cover (page 1), back page (last page), advert slots, poster pages, multi-page article spreads, and filler pages.
-- `coverPrompt`, `articlePrompt`, `genericPrompt`, `posterPrompt` — build image prompts as compact JSON strings. All include `"palette": style.Palette` in the style block.
-- `imageStyleBrief` — assembles a per-page visual brief from style fields.
+- `coverPrompt`, `articlePrompt`, `genericPrompt`, `posterPrompt` — build image prompts as compact JSON strings. Style data should stay structured (`visual_system`, `page_notes`, `typography`, `print_treatment`, `palette`) rather than duplicated into long prose briefs.
+- `stylePromptBlock`, `posterStylePromptBlock` — assemble structured per-page style JSON for image prompts.
 - `pageFormatInstruction` — canonical format/aspect-ratio instruction string.
 - `pageSide`, `pageNumberSide` — left/right page helpers.
 - `isAdvertPage`, `normalizePageCount` — page planning helpers.
@@ -144,12 +144,14 @@ SQLite-backed async task system:
 
 - **Style JSON is the contract.** `magazineStyle` must include language, tone, all visual notes, `articleLength`, and `palette`. Do not hardcode length or color rules — let `defapi text` derive them.
 - **Color palette is hex in JSON.** Do not use a palette strip image. The `colorPalette` struct (primary, secondary, accent, background, text) is generated during style enhancement and injected into every image prompt as structured JSON.
+- **Image prompts should stay structured.** Prefer JSON fields over long duplicated prose. Do not repeat palette, typography, avoid lists, or page furniture inside a generic `visual_brief`; put them in their own fields or constraints.
 - **Issue identity is chosen once.** Issue number, year, date, and label are fixed at build time by `generateIssueContext`. They must not drift across pages.
 - **Brand asset board has four elements:** masthead, wordmark, issue number mark (`"No. N"` only — no date or year), divider. At most one input image slot consumed per page render.
 - **Page furniture = section slug + pub name.** Header is a 2–4 word section/department label. Footer is the publication name or a short label. Issue metadata must not appear in either. Cover and poster pages have no furniture.
 - **Posters skip rewriting.** The user's image description goes directly to the image generator. Posters always occupy exactly one page.
 - **Manual article rewrites are aggressive.** RSS rewrites preserve source facts; manual rewrites may add editorial texture when material is thin.
 - **Creative kit is for reusable modules only.** Not for per-image captions. Image text is generated per page and carries no label prefixes.
+- **Defapi image calls are stateless per page.** Each `defapi image` render has no context from previous or next pages. Every page prompt must carry all needed style, issue, continuity, article, and layout instructions explicitly.
 - **Defapi image input slots are limited.** Reserve slots for article images. Brand assets should cost at most one slot.
 
 ---

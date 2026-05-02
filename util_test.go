@@ -21,7 +21,7 @@ func TestSmartLimitImagePromptPreservesJSON(t *testing.T) {
 	prompt := map[string]any{
 		"task": "render page",
 		"style": map[string]any{
-			"visual_brief": brief,
+			"visual_system": brief,
 		},
 	}
 	b, _ := json.Marshal(prompt)
@@ -38,9 +38,9 @@ func TestSmartLimitImagePromptPreservesJSON(t *testing.T) {
 		t.Fatalf("result is not valid JSON: %v\n%s", err, got)
 	}
 	style, _ := out["style"].(map[string]any)
-	trimmed, _ := style["visual_brief"].(string)
+	trimmed, _ := style["visual_system"].(string)
 	if len([]rune(trimmed)) >= len([]rune(brief)) {
-		t.Fatalf("visual_brief was not trimmed")
+		t.Fatalf("visual_system was not trimmed")
 	}
 }
 

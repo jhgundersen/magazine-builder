@@ -14,7 +14,47 @@ let isRendering = false;
 let renderCallTotal = 0;
 let renderCallDone = 0;
 let originalStylePrompt = "";
+let saveStyleJsonTimer = null;
 const $ = (id) => document.getElementById(id);
+function styleJsonValue() {
+  const json = ($("styleJson") && $("styleJson").value.trim()) || "";
+  return json || $("style").value.trim();
+}
+function existingStyleJson() {
+  const json = ($("styleJson") && $("styleJson").value.trim()) || "";
+  if (json.startsWith("{")) return json;
+  const raw = ($("style") && $("style").value.trim()) || "";
+  return raw.startsWith("{") ? raw : "";
+}
+function setEnhancedStyleJson(json) {
+  if (!$("styleJson")) return;
+  const value = String(json || "").trim();
+  $("styleJson").value = value;
+  const box = $("styleJsonBox");
+  if (box) box.classList.toggle("hidden", !value);
+}
+function styleStatePayload() {
+  return {
+    title: $("title").value,
+    pageCount: $("pageCount").value,
+    prompt: $("style").value,
+    enhancedJson: $("styleJson").value,
+    referencePath,
+  };
+}
+function scheduleSaveStyleJson() {
+  clearTimeout(saveStyleJsonTimer);
+  saveStyleJsonTimer = setTimeout(() => {
+    saveState("style", styleStatePayload());
+    const s = $("styleJsonEditStatus");
+    if (s) {
+      s.textContent = "Saved.";
+      setTimeout(() => {
+        s.textContent = "";
+      }, 2000);
+    }
+  }, 800);
+}
 function workspaceFromURL() {
   return new URLSearchParams(window.location.search).get("workspace") || "";
 }
@@ -40,6 +80,10 @@ function scheduleSaveArticles() {
   if (!workspace) return;
   clearTimeout(saveArticlesTimer);
   saveArticlesTimer = setTimeout(() => saveState("articles", articles), 1000);
+}
+function scheduleSaveStyleState() {
+  if (!workspace) return;
+  scheduleSaveStyleJson();
 }
 function esc(s) {
   return String(s).replace(
@@ -154,7 +198,11 @@ function showStep(n, skipSave) {
 async function ensureStyle() {
   if (!requireApiKey()) return false;
   referencePath = $("reference").value.trim();
-  if ($("style").value.trim().startsWith("{")) return true;
+  const existing = existingStyleJson();
+  if (existing) {
+    setEnhancedStyleJson(existing);
+    return true;
+  }
   $("styleStatus").textContent = "Enhancing style JSON...";
   return await enhanceStyle();
 }
@@ -185,15 +233,17 @@ async function enhanceStyle() {
       }
       try {
         const data = JSON.parse(t.outputJson);
-        $("style").value = data.enhancedStyle;
+        setEnhancedStyleJson(data.enhancedStyle);
         referencePath = data.referencePath || referencePath;
         workspace = data.workspace || workspace;
         updateWorkspaceLabel();
-        saveState("style", {
-          prompt: originalStylePrompt,
-          enhancedJson: data.enhancedStyle,
-          referencePath,
-        });
+        saveState(
+          "style",
+          Object.assign(styleStatePayload(), {
+            prompt: originalStylePrompt,
+            enhancedJson: data.enhancedStyle,
+          }),
+        );
         $("styleStatus").textContent = referencePath
           ? "Enhanced with reference image."
           : "Enhanced.";
@@ -213,7 +263,12 @@ function renderArticles() {
     div.className = "article";
     const kind = a.kind || "article";
     const isPoster = kind === "poster";
-    const bodyLabel = kind === "feature" ? "Feature description" : isPoster ? "Image description" : "Body";
+    const bodyLabel =
+      kind === "feature"
+        ? "Feature description"
+        : isPoster
+          ? "Image description"
+          : "Body";
     const pagesControl = isPoster
       ? ""
       : '<div><label>Pages</label><input type="number" min="1" max="4" value="' +
@@ -230,7 +285,7 @@ function renderArticles() {
       (kind === "feature" ? "selected" : "") +
       '>Feature page</option><option value="poster" ' +
       (isPoster ? "selected" : "") +
-      '>Poster</option></select></div>' +
+      ">Poster</option></select></div>" +
       pagesControl +
       '</div><label>Title</label><input value="' +
       esc(a.title || "") +
@@ -267,8 +322,14 @@ function renderArticles() {
       articles[i].enhanced = false;
       if (k === "kind") renderArticles();
     };
-    el.oninput = (e) => { update(e); scheduleSaveArticles(); };
-    el.onchange = (e) => { update(e); scheduleSaveArticles(); };
+    el.oninput = (e) => {
+      update(e);
+      scheduleSaveArticles();
+    };
+    el.onchange = (e) => {
+      update(e);
+      scheduleSaveArticles();
+    };
   });
   wrap.querySelectorAll("[data-remove]").forEach(
     (el) =>
@@ -381,9 +442,25 @@ $("articleFile").onchange = (e) => {
   };
   reader.readAsText(file);
 };
+$("styleJson").oninput = () => {
+  scheduleSaveStyleJson();
+};
+["title", "style", "reference", "pageCount"].forEach((id) => {
+  const el = $(id);
+  if (!el) return;
+  el.oninput = () => {
+    referencePath = $("reference").value.trim();
+    scheduleSaveStyleState();
+  };
+  el.onchange = () => {
+    referencePath = $("reference").value.trim();
+    scheduleSaveStyleState();
+  };
+});
 $("clear").onclick = () => {
   if (isRendering) return;
   $("style").value = "";
+  setEnhancedStyleJson("");
   $("reference").value = "";
   referencePath = "";
   workspace = "";
@@ -420,7 +497,7 @@ $("generateArticles").onclick = (e) =>
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: $("title").value,
-        style: $("style").value,
+        style: styleJsonValue(),
         count: 4,
         workspace,
         apiKey,
@@ -434,6 +511,7 @@ $("generateArticles").onclick = (e) =>
     }
     workspace = init.workspace || workspace;
     updateWorkspaceLabel();
+    saveState("style", styleStatePayload());
     $("generateStatus").textContent = "Generating articles...";
     await new Promise((resolve) => {
       startTaskPolling(workspace, init.taskId, null, (t) => {
@@ -453,8 +531,10 @@ $("generateArticles").onclick = (e) =>
             scheduleSaveArticles();
             $("generateStatus").textContent =
               "Generated " + (data.articles || []).length + " articles.";
-          } catch (_) {
-            $("generateStatus").textContent = "Could not parse result.";
+          } catch (err) {
+            $("generateStatus").textContent =
+              "Could not parse generated articles: " +
+              (err && err.message ? err.message : "invalid JSON");
           }
         }
         resolve();
@@ -475,7 +555,7 @@ $("importRSS").onclick = (e) =>
         url: $("rss").value,
         limit: 10,
         offset: parseInt($("rssGroup").value || "0", 10),
-        style: $("style").value,
+        style: styleJsonValue(),
         workspace,
         apiKey,
         textModel,
@@ -488,6 +568,7 @@ $("importRSS").onclick = (e) =>
     }
     workspace = init.workspace || workspace;
     updateWorkspaceLabel();
+    saveState("style", styleStatePayload());
     $("rssStatus").textContent = "Importing and rewriting articles...";
     await new Promise((resolve) => {
       startTaskPolling(workspace, init.taskId, null, (t) => {
@@ -506,7 +587,9 @@ $("importRSS").onclick = (e) =>
             renderArticles();
             scheduleSaveArticles();
             $("rssStatus").textContent =
-              "Imported " + (data.articles || []).length + " rewritten articles.";
+              "Imported " +
+              (data.articles || []).length +
+              " rewritten articles.";
           } catch (_) {
             $("rssStatus").textContent = "Could not parse result.";
           }
@@ -530,11 +613,12 @@ function applyBuildResult(data) {
 async function buildPlan() {
   if (!(await ensureStyle())) return;
   ensureClientWorkspace();
+  saveState("style", styleStatePayload());
   const payload = {
     title: $("title").value,
     magazineType: "",
-    style: $("style").value,
-    stylePrompt: originalStylePrompt || $("style").value,
+    style: styleJsonValue(),
+    stylePrompt: originalStylePrompt || $("style").value || styleJsonValue(),
     pageCount: +$("pageCount").value,
     articles,
     workspace,
@@ -570,8 +654,7 @@ async function buildPlan() {
           setProgress("planProgress", 100, "Plan ready.");
           renderPlan(data);
         } catch (_) {
-          out.innerHTML =
-            '<div class="kit">Could not parse plan result.</div>';
+          out.innerHTML = '<div class="kit">Could not parse plan result.</div>';
         }
       }
       resolve();
@@ -627,7 +710,7 @@ function importPlanJSON(raw) {
     $("title").value = data.title || data.style.name;
   }
   if (data.style) {
-    $("style").value = JSON.stringify(data.style, null, 2);
+    setEnhancedStyleJson(JSON.stringify(data.style, null, 2));
   }
   if (data.pages && data.pages.length) {
     $("pageCount").value = String(data.pages.length);
@@ -746,49 +829,109 @@ function setProgress(id, pct, label) {
 function estimatePlanDefapiTextCalls() {
   return 3 + articles.filter((a) => !a.enhanced).length;
 }
-function startTaskPolling(workspaceId, taskId, progressId, onDone) {
-  let stopped = false;
-  async function poll() {
-    if (stopped || !workspaceId || !taskId) return;
+const taskPollers = new Map();
+
+function workspaceTaskPoller(workspaceId) {
+  let poller = taskPollers.get(workspaceId);
+  if (poller) return poller;
+  poller = {
+    subscribers: new Map(),
+    timer: null,
+    inFlight: false,
+  };
+  taskPollers.set(workspaceId, poller);
+
+  poller.stopIfIdle = () => {
+    if (poller.subscribers.size) return;
+    if (poller.timer) clearInterval(poller.timer);
+    taskPollers.delete(workspaceId);
+  };
+
+  poller.poll = async () => {
+    if (poller.inFlight || !poller.subscribers.size) return;
+    poller.inFlight = true;
     try {
-      const res = await fetch(
-        "/api/task?workspace=" +
-          encodeURIComponent(workspaceId) +
-          "&id=" +
-          encodeURIComponent(taskId),
-      );
-      if (!res.ok) return;
-      const t = await res.json();
-      if (progressId && t.progressTotal > 0) {
-        const pct = Math.round(
-          (t.progressDone / Math.max(1, t.progressTotal)) * 100,
-        );
-        const label =
-          t.progressMsg +
-          " (" +
-          t.progressDone +
-          " of " +
-          t.progressTotal +
-          " complete)";
-        setProgress(progressId, pct, label);
-      }
-      if (t.status === "done" || t.status === "failed") {
-        stopped = true;
-        clearInterval(timer);
-        if (onDone) onDone(t);
+      const tasks = await fetchWorkspaceTasks(workspaceId);
+      const byID = taskMapByID(tasks);
+      for (const [taskId, subs] of Array.from(poller.subscribers.entries())) {
+        const task = byID.get(taskId);
+        if (!task) continue;
+        for (const sub of Array.from(subs)) {
+          updateTaskProgressUI(task, sub.progressId);
+          if (task.status === "done" || task.status === "failed") {
+            subs.delete(sub);
+            sub.onDone(task);
+          }
+        }
+        if (!subs.size) poller.subscribers.delete(taskId);
       }
     } catch (_) {
-      // keep polling quietly on network errors
+      // keep polling quietly on transient errors
+    } finally {
+      poller.inFlight = false;
+      poller.stopIfIdle();
     }
+  };
+
+  poller.timer = setInterval(poller.poll, 800);
+  return poller;
+}
+
+function updateTaskProgressUI(task, progressId) {
+  if (!progressId || task.progressTotal <= 0) return;
+  const pct = Math.round(
+    (task.progressDone / Math.max(1, task.progressTotal)) * 100,
+  );
+  const label =
+    task.progressMsg +
+    " (" +
+    task.progressDone +
+    " of " +
+    task.progressTotal +
+    " complete)";
+  setProgress(progressId, pct, label);
+}
+
+function startTaskPolling(workspaceId, taskId, progressId, onDone) {
+  if (!workspaceId || !taskId) return { stop() {} };
+  const poller = workspaceTaskPoller(workspaceId);
+  const sub = {
+    progressId,
+    onDone: onDone || (() => {}),
+  };
+  if (!poller.subscribers.has(taskId)) {
+    poller.subscribers.set(taskId, new Set());
   }
-  poll();
-  const timer = setInterval(poll, 800);
+  poller.subscribers.get(taskId).add(sub);
+  poller.poll();
   return {
     stop() {
-      stopped = true;
-      clearInterval(timer);
+      const subs = poller.subscribers.get(taskId);
+      if (subs) {
+        subs.delete(sub);
+        if (!subs.size) poller.subscribers.delete(taskId);
+      }
+      poller.stopIfIdle();
     },
   };
+}
+function waitForTask(workspaceId, taskId, progressId) {
+  return new Promise((resolve) => {
+    startTaskPolling(workspaceId, taskId, progressId, resolve);
+  });
+}
+async function fetchWorkspaceTasks(workspaceId) {
+  const res = await fetch(
+    "/api/tasks?workspace=" + encodeURIComponent(workspaceId),
+  );
+  if (!res.ok) throw new Error("could not poll workspace tasks");
+  const data = await res.json();
+  return Array.isArray(data.tasks) ? data.tasks : [];
+}
+function taskMapByID(tasks) {
+  const out = new Map();
+  (tasks || []).forEach((t) => out.set(t.id, t));
+  return out;
 }
 function setRenderProgress(label) {
   const next = Math.min(renderCallTotal, renderCallDone + 1);
@@ -831,16 +974,25 @@ function renderPlan(data) {
   wirePromptEditors();
   wireStyleEditor();
   wireKitEditor();
+  wireBrandAssetActions();
   wireSwapEditors();
   wireDrag();
 }
 function brandAssetsHTML(assets) {
   assets = Array.isArray(assets) ? assets : [];
+  const button =
+    '<button class="ghost" id="regenerateBrandAssets" type="button">Regenerate</button>';
   if (!assets.length) {
-    return '<div class="brand-assets empty"><label>Brand assets</label><div class="status">No generated brand sheet for this plan.</div></div>';
+    return (
+      '<div class="brand-assets empty"><div class="row"><label>Brand assets</label>' +
+      button +
+      '</div><div class="status" id="brandAssetsStatus">No generated brand sheet for this plan.</div></div>'
+    );
   }
   return (
-    '<div class="brand-assets"><label>Brand assets</label><div class="brand-asset-row">' +
+    '<div class="brand-assets"><div class="row"><label>Brand assets</label>' +
+    button +
+    '</div><div class="status" id="brandAssetsStatus"></div><div class="brand-asset-row">' +
     assets
       .map(
         (asset) =>
@@ -856,6 +1008,64 @@ function brandAssetsHTML(assets) {
       .join("") +
     "</div></div>"
   );
+}
+function wireBrandAssetActions() {
+  const button = $("regenerateBrandAssets");
+  if (!button) return;
+  button.onclick = (e) =>
+    withBusy(e.currentTarget, "Regenerating...", regenerateBrandAssets);
+}
+async function regenerateBrandAssets() {
+  if (!lastPlan) return;
+  if (!requireApiKey()) return;
+  const status = $("brandAssetsStatus");
+  if (status) status.textContent = "Submitting brand asset task...";
+  const res = await fetch("/api/brand-assets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: $("title").value,
+      style: lastPlan.style || {},
+      issue: issueContext(),
+      workspace,
+      apiKey,
+      imageModel,
+    }),
+  });
+  const init = await res.json();
+  if (!res.ok) {
+    if (status) status.textContent = init.error || "Failed";
+    return;
+  }
+  workspace = init.workspace || workspace;
+  updateWorkspaceLabel();
+  if (status) status.textContent = "Rendering brand asset sheet...";
+  await new Promise((resolve) => {
+    startTaskPolling(workspace, init.taskId, null, (t) => {
+      if (t.status === "failed") {
+        if (status)
+          status.textContent = t.error || "Brand asset generation failed";
+        resolve();
+        return;
+      }
+      try {
+        const data = JSON.parse(t.outputJson || "{}");
+        lastPlan.brandAssets = data.brandAssets || [];
+        workspace = data.workspace || workspace;
+        updateWorkspaceLabel();
+        saveState("plan", lastPlan);
+        renderPlan(lastPlan);
+        const nextStatus = $("brandAssetsStatus");
+        if (nextStatus) nextStatus.textContent = "Brand assets regenerated.";
+      } catch (err) {
+        if (status)
+          status.textContent =
+            "Could not parse brand asset result: " +
+            (err && err.message ? err.message : "invalid JSON");
+      }
+      resolve();
+    });
+  });
 }
 function pageGridHTML(pages) {
   const cover = pages[0] ? pageHTML(pages[0], 0) : "";
@@ -1042,9 +1252,7 @@ function buildArticlePromptClient(page, a) {
       tone: style.tone || "editorial",
       issue: issueContext(),
     },
-    style: {
-      visual_brief: visualStyleBrief(kind),
-    },
+    style: stylePromptBlock(kind),
     content: {
       title: a.title || "Untitled",
       brief_body: a.body || "",
@@ -1073,7 +1281,7 @@ function wireStyleEditor() {
       try {
         const nextStyle = JSON.parse(e.target.value || "{}");
         lastPlan.style = nextStyle;
-        $("style").value = JSON.stringify(nextStyle, null, 2);
+        setEnhancedStyleJson(JSON.stringify(nextStyle, null, 2));
         pagePool = buildPagePool(lastPlan.pages || []);
         const status = $("styleJsonStatus");
         if (status) status.textContent = "Style JSON applied.";
@@ -1264,20 +1472,8 @@ async function generateCoverPlan() {
 }
 async function renderRemainingPages() {
   try {
-    const pages = lastPlan.pages.slice();
     setRenderProgress("Rendering pages");
-    let index = 0;
-    async function worker() {
-      while (index < pages.length) {
-        const p = pages[index++];
-        setStatus(p.number, "Defapi image call queued...");
-        const img = await renderPage(p, "");
-        renderedImages[p.number] = img;
-        completeRenderCall("Rendered page " + p.number);
-        renderPlan(lastPlan);
-      }
-    }
-    await Promise.all([worker(), worker(), worker()]);
+    await renderPageQueue(lastPlan.pages.slice(), 3);
     const ordered = lastPlan.pages
       .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
       .filter(Boolean);
@@ -1327,7 +1523,7 @@ async function renderRemainingPages() {
     renderPlan(lastPlan);
   }
 }
-async function renderPage(page, styleReference) {
+async function startRenderPageTask(page, styleReference) {
   setStatus(page.number, "Queuing render...");
   const ref = page.number === 1 ? referencePath : "";
   const renderPageData = Object.assign({}, page, {
@@ -1355,24 +1551,68 @@ async function renderPage(page, styleReference) {
     throw new Error(init.error || "render task start failed");
   }
   workspace = init.workspace || workspace;
+  updateWorkspaceLabel();
   setStatus(page.number, "Rendering...");
-  return new Promise((resolve, reject) => {
-    startTaskPolling(workspace, init.taskId, null, (t) => {
-      if (t.status === "failed") {
-        setStatus(page.number, t.error || "Render failed");
-        reject(new Error(t.error || "render failed"));
+  return { taskId: init.taskId, page };
+}
+function finishRenderPageTask(task, page) {
+  if (task.status === "failed") {
+    setStatus(page.number, task.error || "Render failed");
+    throw new Error(task.error || "render failed");
+  }
+  try {
+    const data = JSON.parse(task.outputJson || "{}");
+    if (!data.image) throw new Error("missing image");
+    setStatus(page.number, "Rendered");
+    renderedImages[page.number] = {
+      image: data.image,
+      publicUrl: data.publicUrl || "",
+    };
+    completeRenderCall("Rendered page " + page.number);
+    renderPlan(lastPlan);
+  } catch (e) {
+    setStatus(page.number, "Parse error");
+    throw new Error("could not parse render result for page " + page.number);
+  }
+}
+async function renderPageQueue(pages, concurrency) {
+  const pending = pages.slice();
+  async function worker() {
+    while (pending.length) {
+      const page = pending.shift();
+      const task = await startRenderPageTask(page, "");
+      const done = await waitForTask(workspace, task.taskId);
+      finishRenderPageTask(done, page);
+    }
+  }
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, pending.length); i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+}
+async function waitForRunningRenderTasks(runningRenderTasks) {
+  const waits = (runningRenderTasks || [])
+    .map((task) => {
+      let pageNum;
+      try {
+        pageNum = JSON.parse(task.inputJson || "{}").page?.number;
+      } catch (_) {}
+      const page = (lastPlan.pages || []).find((p) => p.number === pageNum);
+      if (!page || renderedImages[page.number]) return null;
+      setStatus(page.number, "Rendering...");
+      return { task, page };
+    })
+    .filter(Boolean)
+    .map(async ({ task, page }) => {
+      const done = await waitForTask(workspace, task.id);
+      if (done.status === "failed") {
+        setStatus(page.number, done.error || "Failed");
         return;
       }
-      try {
-        const data = JSON.parse(t.outputJson);
-        setStatus(page.number, "Rendered");
-        resolve({ image: data.image, publicUrl: data.publicUrl || "" });
-      } catch (e) {
-        setStatus(page.number, "Parse error");
-        reject(new Error("could not parse render result"));
-      }
+      finishRenderPageTask(done, page);
     });
-  });
+  await Promise.all(waits);
 }
 function finalRenderPrompt(page) {
   if (page.kind === "poster") return fitPromptJSON(posterPromptFromPage(page));
@@ -1384,10 +1624,7 @@ function finalRenderPrompt(page) {
       tone: ((lastPlan && lastPlan.style) || {}).tone || "editorial",
       issue: issueContext(),
     });
-    prompt.style = {
-      visual_brief: visualStyleBrief(page.kind || "content"),
-      palette: ((prompt.style || {}).palette) || undefined,
-    };
+    prompt.style = stylePromptBlock(page.kind || "content");
     const brand = brandAssetPrompt(page);
     if (brand) prompt.style.brand_assets = brand;
     if (prompt.layout) {
@@ -1401,7 +1638,9 @@ function finalRenderPrompt(page) {
     }
     if (page.kind === "cover") {
       prompt.content = Object.assign({}, prompt.content || {}, {
-        cover_plan: (lastPlan && lastPlan.coverPlan) || { lines: coverLinePages() },
+        cover_plan: (lastPlan && lastPlan.coverPlan) || {
+          lines: coverLinePages(),
+        },
       });
     }
     return fitPromptJSON(prompt);
@@ -1413,52 +1652,60 @@ function posterPromptFromPage(page) {
   const style = (lastPlan && lastPlan.style) || {};
   const article = page.article || {};
   let parsed = {};
-  try { parsed = JSON.parse(page.prompt || "{}"); } catch (_) {}
+  try {
+    parsed = JSON.parse(page.prompt || "{}");
+  } catch (_) {}
   const format =
     (parsed.metadata && parsed.metadata.format) ||
     "FORMAT: Portrait magazine page, aspect ratio 1240:1754 (about 1:1.414), full page visible edge to edge, no 9:16 crop.";
   const imageDesc = compactClient(
     (parsed.content && parsed.content.image_description) ||
-    article.body || page.body || page.title || "",
+      article.body ||
+      page.body ||
+      page.title ||
+      "",
     1200,
   );
   return {
-    task: "Create a full-page poster image for this print magazine. The entire page is one continuous image. No article layout, no multi-column body text, no headline block, no sidebar boxes, no pull quotes.",
+    task: "Create an interior full-page poster image for this print magazine. This is not the front cover. The entire page is one continuous image. No article layout, no multi-column body text, no headline block, no sidebar boxes, no pull quotes.",
     metadata: {
       publication: $("title").value || "Untitled Magazine",
       page_role: "poster",
+      placement: "inside page, not cover",
       language: style.language || "English",
       tone: style.tone || "editorial",
       issue: issueContext(),
       format,
     },
-    style: {
-      visual_brief: visualStyleBrief("poster"),
-      palette: style.palette || undefined,
-      brand_assets: brandAssetPrompt(page) || undefined,
-    },
+    style: posterStylePromptBlock(),
     content: { image_description: imageDesc },
     constraints: [
-      "pure full-page image — no columns, no headline, no sidebar boxes",
+      "one continuous edge-to-edge image; no article layout, no columns, no headline block, no sidebar boxes, no pull quotes",
+      "do not create a cover: no masthead, no cover lines, no barcode, no price, no issue seal, no date, no front-page furniture",
+      "no running header, footer, folio, page number, wordmark or brand asset",
+      "small lettering is acceptable only if it is naturally part of the poster image itself",
       style.avoid ? "avoid " + style.avoid : "",
     ].filter(Boolean),
   };
 }
 function brandAssetsForRender(page) {
-  if (!lastPlan || page.kind === "advert") return [];
+  if (!lastPlan || page.kind === "advert" || page.kind === "poster") return [];
   return (lastPlan.brandAssets || []).filter((asset) => asset.publicUrl);
 }
 function brandAssetPrompt(page) {
-  if (!lastPlan || page.kind === "advert") return "";
+  if (!lastPlan || page.kind === "advert" || page.kind === "poster") return "";
   if (!brandAssetsForRender(page).length) return "";
   const use = brandAssetUseForPage(page);
-  return (
-    "A supplied brand asset board contains masthead, wordmark, issue seal, divider and folio marks. For this page, use at most one element from the board: " +
-    use.element +
-    ". Purpose: " +
-    use.purpose +
-    ". Do not use the other board elements on this page. Do not reproduce the whole board, its background, spacing, labels, or any non-brand explanatory text."
-  );
+  return {
+    reference: "supplied brand asset board",
+    use: use.element,
+    purpose: use.purpose,
+    restrictions: [
+      "use at most one element",
+      "do not reproduce the whole board",
+      "do not copy board background, spacing, labels or explanatory text",
+    ],
+  };
 }
 function brandAssetUseForPage(page) {
   const kind = page.kind || "article";
@@ -1502,8 +1749,8 @@ function fitPromptJSON(prompt) {
   }
   out = JSON.stringify(prompt);
   if (out.length <= 3800) return out;
-  if (prompt.style && prompt.style.visual_brief) {
-    prompt.style.visual_brief = compactClient(prompt.style.visual_brief, 850);
+  if (prompt.style && prompt.style.visual_system) {
+    prompt.style.visual_system = compactClient(prompt.style.visual_system, 650);
   }
   out = JSON.stringify(prompt);
   if (out.length <= 3800) return out;
@@ -1534,8 +1781,7 @@ function cleanPromptFromPage(page) {
         "Portrait magazine page, aspect ratio 1240:1754, full page visible edge to edge, no crop.",
     },
     style: {
-      visual_brief: visualStyleBrief(page.kind || "content"),
-      palette: ((lastPlan && lastPlan.style) || {}).palette || undefined,
+      ...stylePromptBlock(page.kind || "content"),
       creative_kit: creativeKitForPage(page.kind || "content"),
       brand_assets: brandAssetPrompt(page) || undefined,
     },
@@ -1543,16 +1789,12 @@ function cleanPromptFromPage(page) {
       title: page.title || article.title || "Untitled",
       brief_body: compactClient(body, 1500),
       modules: pageModules(page),
-      image_text_notes:
-        "If images or illustrations are used, write short image text from this article. Do not use generic reusable image text. Write only the image text itself, without a label prefix.",
     },
     layout: {
       required_elements:
         "headline, deck, byline/source if available, readable columns, image or comic illustration slots, article-specific image text, pull quote/sidebar where useful",
     },
-    constraints: [
-      style.avoid ? "avoid " + style.avoid : "",
-    ].filter(Boolean),
+    constraints: [style.avoid ? "avoid " + style.avoid : ""].filter(Boolean),
   };
 }
 function compactClient(s, max) {
@@ -1608,7 +1850,7 @@ function creativeKitForPage(kind) {
     return { departments: take(kit.departments), sidebars: take(kit.sidebars) };
   return { sidebars: take(kit.sidebars) };
 }
-function visualStyleBrief(kind) {
+function stylePromptBlock(kind) {
   const style = (lastPlan && lastPlan.style) || {};
   const specific =
     kind === "cover"
@@ -1622,19 +1864,37 @@ function visualStyleBrief(kind) {
             : kind === "back-page"
               ? style.back
               : style.content || style.short;
-  return [
-    "Self-contained visual system for this page:",
-    style.core,
-    style.content,
-    specific,
-    "Typography: " + (style.typography || ""),
-    "Palette: " + (style.color || ""),
-    "Print treatment: " + (style.print || ""),
-    "Page furniture: fixed margins and column grid; running-header at the top; footer rule and folio at the outer bottom corner; uniform image-text treatment.",
-    style.avoid ? "Avoid: " + style.avoid : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  return {
+    visual_system: compactClient(
+      [style.core, style.content].filter(Boolean).join(" "),
+      700,
+    ),
+    page_notes: specific || "",
+    typography: style.typography || "",
+    print_treatment: style.print || "",
+    palette: style.palette || undefined,
+  };
+}
+function posterStylePromptBlock() {
+  const style = (lastPlan && lastPlan.style) || {};
+  const specific = style.feature || style.content || style.short;
+  return {
+    visual_system: compactClient(
+      [style.core, style.content].filter(Boolean).join(" "),
+      700,
+    ),
+    page_notes: specific ? "Interior poster image treatment: " + specific : "",
+    typography: style.typography || "",
+    print_treatment: style.print || "",
+    palette: style.palette || undefined,
+    placement: "interior poster page",
+    layout_exclusions: [
+      "magazine furniture",
+      "article grid",
+      "masthead",
+      "cover composition",
+    ],
+  };
 }
 function coverLinePages() {
   if (!lastPlan || !lastPlan.pages) return "inside stories";
@@ -1671,11 +1931,12 @@ async function restoreWorkspaceState() {
     if (state.style) {
       try {
         const s = JSON.parse(state.style);
+        if (s.title) $("title").value = s.title;
+        if (s.pageCount) $("pageCount").value = String(s.pageCount);
         if (s.prompt) $("style").value = s.prompt;
         if (s.referencePath) referencePath = s.referencePath;
-        if (s.enhancedJson && $("style").value === s.prompt) {
-          $("style").value = s.enhancedJson;
-        }
+        if (s.referencePath) $("reference").value = referencePath;
+        if (s.enhancedJson) setEnhancedStyleJson(s.enhancedJson);
       } catch (_) {}
     }
 
@@ -1723,7 +1984,11 @@ async function restoreWorkspaceState() {
     if (runningBuild) {
       const out = $("output");
       if (out)
-        out.innerHTML = progressHTML("Reconnecting to build...", 10, "planProgress");
+        out.innerHTML = progressHTML(
+          "Reconnecting to build...",
+          10,
+          "planProgress",
+        );
       startTaskPolling(workspace, runningBuild.id, "planProgress", (t) => {
         if (t.status === "done") {
           try {
@@ -1777,53 +2042,11 @@ async function resumeRenderPhase(runningRenderTasks) {
   );
   renderPlan(lastPlan);
   try {
-    // Poll all currently running render-page tasks in parallel
-    await Promise.all(
-      runningRenderTasks.map((t) => {
-        let pageNum;
-        try {
-          pageNum = JSON.parse(t.inputJson || "{}").page?.number;
-        } catch (_) {}
-        if (!pageNum) return Promise.resolve();
-        setStatus(pageNum, "Rendering...");
-        return new Promise((resolve) => {
-          startTaskPolling(workspace, t.id, null, (done) => {
-            if (done.status === "done") {
-              try {
-                const out = JSON.parse(done.outputJson || "{}");
-                renderedImages[pageNum] = {
-                  image: out.image,
-                  publicUrl: out.publicUrl || "",
-                };
-                completeRenderCall("Rendered page " + pageNum);
-                renderPlan(lastPlan);
-              } catch (_) {}
-            } else {
-              setStatus(pageNum, done.error || "Failed");
-            }
-            resolve();
-          });
-        });
-      }),
-    );
-    // Render any pages that are still missing (not started or failed)
+    await waitForRunningRenderTasks(runningRenderTasks);
     const remaining = lastPlan.pages.filter((p) => !renderedImages[p.number]);
     if (remaining.length > 0) {
-      let idx = 0;
-      async function worker() {
-        while (idx < remaining.length) {
-          const p = remaining[idx++];
-          try {
-            const img = await renderPage(p, "");
-            renderedImages[p.number] = img;
-            completeRenderCall("Rendered page " + p.number);
-            renderPlan(lastPlan);
-          } catch (_) {}
-        }
-      }
-      await Promise.all([worker(), worker(), worker()]);
+      await renderPageQueue(remaining, 3);
     }
-    // Write PDF
     const ordered = lastPlan.pages
       .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
       .filter(Boolean);
@@ -1851,7 +2074,11 @@ async function resumeRenderPhase(runningRenderTasks) {
       return;
     }
     completeRenderCall("PDF ready");
-    setProgress("renderProgress", 100, "Done. Download should start automatically.");
+    setProgress(
+      "renderProgress",
+      100,
+      "Done. Download should start automatically.",
+    );
     $("renderStatus").insertAdjacentHTML(
       "beforeend",
       '<div class="status"><a href="' +

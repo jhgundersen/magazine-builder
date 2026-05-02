@@ -4,7 +4,9 @@ PREFIX ?= $(HOME)/.local
 BINARY ?= magazine-builder
 BUILD_DIR ?= bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+INSTALL_VERSION ?= dev
 LDFLAGS = -ldflags "-X main.version=$(VERSION)"
+INSTALL_LDFLAGS = -ldflags "-X main.version=$(INSTALL_VERSION)"
 
 .PHONY: fmt test check build run install
 
@@ -27,4 +29,4 @@ run:
 
 install: build
 	mkdir -p $(PREFIX)/bin
-	env GOCACHE=$(GOCACHE) go build $(LDFLAGS) -o $(PREFIX)/bin/$(BINARY) .
+	env GOCACHE=$(GOCACHE) go build $(INSTALL_LDFLAGS) -o $(PREFIX)/bin/$(BINARY) .
