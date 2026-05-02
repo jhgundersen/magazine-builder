@@ -331,7 +331,7 @@ func styleLineSpecific(style magazineStyle, kind string) string {
 	switch kind {
 	case "cover":
 		return style.Cover
-	case "feature":
+	case "feature", "poster":
 		return style.Feature
 	case "short", "article":
 		return style.Short

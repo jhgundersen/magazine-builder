@@ -102,12 +102,18 @@ func planMagazine(req buildRequest, style magazineStyle, kit creativeKit, issue 
 		}
 		if itemIndex < len(req.Articles) {
 			a := req.Articles[itemIndex]
-			totalParts := normalizedArticlePages(a)
-			itemPart++
 			kind := strings.TrimSpace(a.Kind)
 			if kind == "" {
 				kind = "article"
 			}
+			if kind == "poster" {
+				pages = append(pages, pagePlan{Number: n, Kind: "poster", Title: a.Title, Article: &a, Images: a.Images, Prompt: posterPrompt(title, style, a.Body, issue)})
+				itemIndex++
+				itemPart = 0
+				continue
+			}
+			totalParts := normalizedArticlePages(a)
+			itemPart++
 			if kind != "feature" && len([]rune(a.Body)) > 1800 {
 				kind = "feature"
 			}
@@ -244,6 +250,33 @@ func genericPrompt(n int, title string, style magazineStyle, modules, kind, task
 			"module_ideas": modules,
 		},
 		"constraints": []string{"full page visible", "no crop", "fictional brands only unless supplied by article content", "avoid " + style.Avoid},
+	})
+}
+
+func posterPrompt(title string, style magazineStyle, userPrompt string, issue issueContext) string {
+	return imagePromptJSON(map[string]any{
+		"task": "Create a full-page poster for a print magazine.",
+		"metadata": map[string]any{
+			"publication": title,
+			"page_role":   "poster",
+			"language":    emptyDefault(style.Language, "English"),
+			"format":      pageFormatInstruction(),
+			"tone":        emptyDefault(style.Tone, "editorial"),
+			"issue":       issue,
+		},
+		"style": map[string]any{
+			"visual_brief": imageStyleBrief(style, "poster"),
+			"palette":      style.Palette,
+		},
+		"content": map[string]any{
+			"image_description": compact(userPrompt, 800),
+		},
+		"constraints": []string{
+			"full page visible", "no crop",
+			"pure image composition — no headline, no byline, no body text columns",
+			"a small title or short caption is acceptable only if it strongly enhances the composition",
+			"avoid " + style.Avoid,
+		},
 	})
 }
 

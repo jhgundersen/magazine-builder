@@ -336,7 +336,7 @@ func (s *server) generatePageFurniture(ctx context.Context, style magazineStyle,
 }
 
 func (s *server) pagePromptWithFurniture(ctx context.Context, style magazineStyle, page pagePlan, issue issueContext) string {
-	if strings.EqualFold(page.Kind, "cover") {
+	if strings.EqualFold(page.Kind, "cover") || strings.EqualFold(page.Kind, "poster") {
 		return page.Prompt
 	}
 	workspace, _ := ctx.Value(workspaceContextKey{}).(string)

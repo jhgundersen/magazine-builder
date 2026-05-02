@@ -444,7 +444,7 @@ func (s *server) runBuildTask(db *sql.DB, workspace, taskID string, req buildReq
 	s.workspaceLogJSON(workspace, "build: issue JSON", issue)
 	done++
 	for i := range req.Articles {
-		if req.Articles[i].Enhanced {
+		if req.Articles[i].Enhanced || req.Articles[i].Kind == "poster" {
 			continue
 		}
 		s.taskProgress(db, taskID, done, total, fmt.Sprintf("Rewriting %q", emptyDefault(req.Articles[i].Title, "Untitled")))

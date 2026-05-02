@@ -212,6 +212,15 @@ function renderArticles() {
     const div = document.createElement("div");
     div.className = "article";
     const kind = a.kind || "article";
+    const isPoster = kind === "poster";
+    const bodyLabel = kind === "feature" ? "Feature description" : isPoster ? "Image description" : "Body";
+    const pagesControl = isPoster
+      ? ""
+      : '<div><label>Pages</label><input type="number" min="1" max="4" value="' +
+        esc(a.pages || 1) +
+        '" data-i="' +
+        i +
+        '" data-k="pages"></div>';
     div.innerHTML =
       '<div class="row"><div><label>Type</label><select data-i="' +
       i +
@@ -219,16 +228,16 @@ function renderArticles() {
       (kind === "article" ? "selected" : "") +
       '>Article</option><option value="feature" ' +
       (kind === "feature" ? "selected" : "") +
-      '>Feature page</option></select></div><div><label>Pages</label><input type="number" min="1" max="4" value="' +
-      esc(a.pages || 1) +
-      '" data-i="' +
-      i +
-      '" data-k="pages"></div></div><label>Title</label><input value="' +
+      '>Feature page</option><option value="poster" ' +
+      (isPoster ? "selected" : "") +
+      '>Poster</option></select></div>' +
+      pagesControl +
+      '</div><label>Title</label><input value="' +
       esc(a.title || "") +
       '" data-i="' +
       i +
       '" data-k="title"><label>' +
-      (kind === "feature" ? "Feature description" : "Body") +
+      bodyLabel +
       '</label><textarea data-i="' +
       i +
       '" data-k="body">' +
@@ -309,6 +318,18 @@ $("addFeature").onclick = () => {
     kind: "feature",
     title: "",
     body: "Describe this feature page: comments, crossword, quiz, listings, letters, classifieds, TV program, calendar, chart, etc.",
+    images: [],
+    pages: 1,
+    enhanced: false,
+  });
+  renderArticles();
+};
+$("addPoster").onclick = () => {
+  if (isRendering) return;
+  articles.push({
+    kind: "poster",
+    title: "",
+    body: "",
     images: [],
     pages: 1,
     enhanced: false,
