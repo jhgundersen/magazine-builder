@@ -91,6 +91,76 @@ func cleanArticleHTML(s string) string {
 	return s
 }
 
+func extractJSONObject(text string) string {
+	text = stripCodeFence(strings.TrimSpace(text))
+	best := ""
+	start := -1
+	depth := 0
+	inString := false
+	escaped := false
+	for i, r := range text {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			if r == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch r {
+		case '"':
+			inString = true
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					best = text[start : i+1]
+					start = -1
+				}
+			}
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return text
+}
+
+func stripCodeFence(text string) string {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "```") {
+		return text
+	}
+	text = strings.TrimPrefix(text, "```")
+	if i := strings.IndexAny(text, "\r\n"); i >= 0 {
+		first := strings.TrimSpace(text[:i])
+		if first == "" || strings.EqualFold(first, "json") {
+			text = text[i+1:]
+		} else {
+			text = first + text[i:]
+		}
+	} else {
+		text = strings.TrimSpace(text)
+		if strings.EqualFold(text, "json") {
+			return ""
+		}
+	}
+	text = strings.TrimSpace(text)
+	text = strings.TrimSuffix(text, "```")
+	return strings.TrimSpace(text)
+}
+
 func compact(s string, max int) string {
 	s = cleanText(s)
 	if len([]rune(s)) <= max {

@@ -97,6 +97,20 @@ func TestComparableVersionNormalizesDirtyBuilds(t *testing.T) {
 	}
 }
 
+func TestExtractJSONObjectHandlesJSONCodeFence(t *testing.T) {
+	input := "```json\n{\"key\":\"value\"}\n```"
+	if got := extractJSONObject(input); got != `{"key":"value"}` {
+		t.Fatalf("extractJSONObject fenced = %q", got)
+	}
+}
+
+func TestExtractJSONObjectHandlesInlineJSONCodeFence(t *testing.T) {
+	input := "```json {\"key\":\"value\"} ```"
+	if got := extractJSONObject(input); got != `{"key":"value"}` {
+		t.Fatalf("extractJSONObject inline fenced = %q", got)
+	}
+}
+
 func TestExtractLikelyArticleRemovesEmbedsLinksAndFindsImages(t *testing.T) {
 	html := `<html><body>
 <nav>menu noise</nav>

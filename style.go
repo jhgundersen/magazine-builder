@@ -276,52 +276,6 @@ func decodeCreativeKit(text string) (creativeKit, error) {
 	return kit, nil
 }
 
-func extractJSONObject(text string) string {
-	text = strings.TrimSpace(text)
-	best := ""
-	start := -1
-	depth := 0
-	inString := false
-	escaped := false
-	for i, r := range text {
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if r == '\\' {
-				escaped = true
-				continue
-			}
-			if r == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch r {
-		case '"':
-			inString = true
-		case '{':
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		case '}':
-			if depth > 0 {
-				depth--
-				if depth == 0 && start >= 0 {
-					best = text[start : i+1]
-					start = -1
-				}
-			}
-		}
-	}
-	if best != "" {
-		return best
-	}
-	return text
-}
-
 func styleLine(style magazineStyle, kind string) string {
 	specific := styleLineSpecific(style, kind)
 	return compact(strings.Join([]string{"Language: " + emptyDefault(style.Language, "English"), "Tone: " + emptyDefault(style.Tone, "editorial"), style.Core, style.Typography, style.Color, style.Print, specific, "Avoid: " + style.Avoid}, " "), 900)
