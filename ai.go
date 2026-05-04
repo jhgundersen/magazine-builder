@@ -285,7 +285,7 @@ func (s *server) planReleaseArticles(ctx context.Context, release gitHubRelease,
 	var out struct {
 		Articles []articleBrief `json:"articles"`
 	}
-	if err := s.runDefapiTextJSON(ctx, prompt, 2000, &out); err != nil {
+	if err := s.runDefapiTextJSON(ctx, prompt, 5000, &out); err != nil {
 		return nil, err
 	}
 	if len(out.Articles) == 0 {
@@ -302,7 +302,7 @@ func (s *server) planPageArticles(ctx context.Context, a article, style magazine
 	var out struct {
 		Articles []articleBrief `json:"articles"`
 	}
-	if err := s.runDefapiTextJSON(ctx, prompt, 2000, &out); err != nil {
+	if err := s.runDefapiTextJSON(ctx, prompt, 4000, &out); err != nil {
 		return nil, err
 	}
 	if len(out.Articles) == 0 {
@@ -325,7 +325,7 @@ func (s *server) writeArticleFromBrief(ctx context.Context, brief articleBrief, 
 		Title string `json:"title"`
 		Body  string `json:"body"`
 	}
-	if err := s.runDefapiTextJSON(ctx, prompt, 3000, &out); err != nil {
+	if err := s.runDefapiTextJSON(ctx, prompt, 5000, &out); err != nil {
 		return article{}, err
 	}
 	return article{

@@ -443,6 +443,12 @@ textarea {
   color: var(--muted);
   margin: 4px 0 8px;
 }
+.regen-btn {
+  float: right;
+  margin-top: -2px;
+  font-size: 14px;
+  padding: 2px 8px;
+}
 @media (max-width: 760px) {
   .shell {
     padding: 18px 12px 32px;

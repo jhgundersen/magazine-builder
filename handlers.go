@@ -46,16 +46,17 @@ type generateArticlesRequest struct {
 }
 
 type buildRequest struct {
-	MagazineType string    `json:"magazineType"`
-	Title        string    `json:"title"`
-	Style        string    `json:"style"`
-	StylePrompt  string    `json:"stylePrompt"`
-	PageCount    int       `json:"pageCount"`
-	Articles     []article `json:"articles"`
-	Workspace    string    `json:"workspace"`
-	APIKey       string    `json:"apiKey"`
-	TextModel    string    `json:"textModel"`
-	ImageModel   string    `json:"imageModel"`
+	MagazineType string       `json:"magazineType"`
+	Title        string       `json:"title"`
+	Style        string       `json:"style"`
+	StylePrompt  string       `json:"stylePrompt"`
+	PageCount    int          `json:"pageCount"`
+	Articles     []article    `json:"articles"`
+	Issue        issueContext `json:"issue"`
+	Workspace    string       `json:"workspace"`
+	APIKey       string       `json:"apiKey"`
+	TextModel    string       `json:"textModel"`
+	ImageModel   string       `json:"imageModel"`
 }
 
 type brandAssetsRequest struct {
@@ -584,11 +585,18 @@ func (s *server) runBuildTask(db *sql.DB, workspace, taskID string, req buildReq
 	s.workspaceLogJSON(workspace, "build: style JSON", style)
 	s.workspaceLogJSON(workspace, "build: input articles", articleLogEntries(req.Articles, false))
 	s.taskProgress(db, taskID, done, total, "Choosing issue number and date")
-	issue, err := s.generateIssueContext(ctx, req, style)
-	if err != nil {
-		log.Printf("defapi text issue context failed: %v", err)
-		s.workspaceLog(workspace, "build: issue context failed: %v", err)
-		issue = newIssueContext(time.Now())
+	var issue issueContext
+	var err error
+	if req.Issue.Number > 0 {
+		issue = normalizeIssueContext(req.Issue, time.Now())
+		s.workspaceLog(workspace, "build: using provided issue number=%d date=%s", issue.Number, issue.Date)
+	} else {
+		issue, err = s.generateIssueContext(ctx, req, style)
+		if err != nil {
+			log.Printf("defapi text issue context failed: %v", err)
+			s.workspaceLog(workspace, "build: issue context failed: %v", err)
+			issue = newIssueContext(time.Now())
+		}
 	}
 	s.workspaceLogJSON(workspace, "build: issue JSON", issue)
 	done++

@@ -40,6 +40,8 @@ function styleStatePayload() {
     prompt: $("style").value,
     enhancedJson: $("styleJson").value,
     referencePath,
+    issueNumber: ($("issueNumber") && $("issueNumber").value.trim()) || "",
+    issueDate: ($("issueDate") && $("issueDate").value.trim()) || "",
   };
 }
 function scheduleSaveStyleJson() {
@@ -445,7 +447,7 @@ $("articleFile").onchange = (e) => {
 $("styleJson").oninput = () => {
   scheduleSaveStyleJson();
 };
-["title", "style", "reference", "pageCount"].forEach((id) => {
+["title", "style", "reference", "pageCount", "issueNumber", "issueDate"].forEach((id) => {
   const el = $(id);
   if (!el) return;
   el.oninput = () => {
@@ -463,6 +465,8 @@ $("clear").onclick = () => {
   setEnhancedStyleJson("");
   $("reference").value = "";
   referencePath = "";
+  if ($("issueNumber")) $("issueNumber").value = "";
+  if ($("issueDate")) $("issueDate").value = "";
   workspace = "";
   $("styleStatus").textContent = "";
 };
@@ -621,6 +625,7 @@ async function buildPlan() {
     stylePrompt: originalStylePrompt || $("style").value || styleJsonValue(),
     pageCount: +$("pageCount").value,
     articles,
+    issue: issueContext(),
     workspace,
     apiKey,
     textModel,
@@ -803,6 +808,8 @@ $("render").onclick = (e) =>
   withBusy(e.currentTarget, "Preparing...", () => startRenderFlow());
 $("renderSide").onclick = (e) =>
   withBusy(e.currentTarget, "Preparing...", () => startRenderFlow());
+$("writePdfBtn").onclick = (e) =>
+  withBusy(e.currentTarget, "Writing PDF…", writePDF);
 $("downloadPdfJson").onclick = () => $("download").click();
 function progressHTML(label, pct, id) {
   id = id || "planProgress";
@@ -977,6 +984,8 @@ function renderPlan(data) {
   wireBrandAssetActions();
   wireSwapEditors();
   wireDrag();
+  wireRegenButtons();
+  updateWritePdfButton();
 }
 function brandAssetsHTML(assets) {
   assets = Array.isArray(assets) ? assets : [];
@@ -1089,6 +1098,12 @@ function pageHTML(p, i) {
   const img = item ? item.image : "";
   const canDrag = !fixed && !isRendering;
   const swap = swapHTML(p, i, fixed);
+  const regenBtn =
+    currentStep === 4 && img && !isRendering
+      ? '<button class="ghost regen-btn" data-regen-num="' +
+        p.number +
+        '" title="Re-render this page" type="button">↻</button>'
+      : "";
   return (
     '<article class="page ' +
     (fixed ? "fixed" : "") +
@@ -1098,7 +1113,9 @@ function pageHTML(p, i) {
     canDrag +
     '"><span class="kind">' +
     esc(p.kind) +
-    "</span><h3>" +
+    "</span>" +
+    regenBtn +
+    "<h3>" +
     p.number +
     ". " +
     esc(p.title) +
@@ -1283,8 +1300,9 @@ function wireStyleEditor() {
         lastPlan.style = nextStyle;
         setEnhancedStyleJson(JSON.stringify(nextStyle, null, 2));
         pagePool = buildPagePool(lastPlan.pages || []);
+        saveState("plan", lastPlan);
         const status = $("styleJsonStatus");
-        if (status) status.textContent = "Style JSON applied.";
+        if (status) status.textContent = "Style JSON applied and saved.";
       } catch (err) {
         const status = $("styleJsonStatus");
         if (status)
@@ -1300,8 +1318,9 @@ function wireKitEditor() {
       if (!lastPlan) return;
       try {
         lastPlan.creativeKit = JSON.parse(e.target.value || "{}");
+        saveState("plan", lastPlan);
         const status = $("kitJsonStatus");
-        if (status) status.textContent = "Creative kit JSON applied.";
+        if (status) status.textContent = "Creative kit JSON applied and saved.";
       } catch (err) {
         const status = $("kitJsonStatus");
         if (status)
@@ -1474,50 +1493,86 @@ async function renderRemainingPages() {
   try {
     setRenderProgress("Rendering pages");
     await renderPageQueue(lastPlan.pages.slice(), 3);
-    const ordered = lastPlan.pages
-      .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
-      .filter(Boolean);
-    if (ordered.length !== lastPlan.pages.length) {
-      throw new Error(
-        "Missing rendered pages: expected " +
-          lastPlan.pages.length +
-          ", got " +
-          ordered.length,
-      );
-    }
-    setRenderProgress("Writing PDF");
-    const res = await fetch("/api/write-pdf", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: $("title").value,
-        images: ordered,
-        workspace,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      $("renderStatus").textContent = data.error || "PDF failed";
-      return;
-    }
-    completeRenderCall("PDF ready");
+    const rendered = Object.keys(renderedImages).length;
+    completeRenderCall("All pages rendered");
     setProgress(
       "renderProgress",
       100,
-      "Done. Download should start automatically.",
+      "All " + rendered + " pages rendered. Click below to write the PDF.",
     );
-    $("renderStatus").insertAdjacentHTML(
-      "beforeend",
-      '<div class="status"><a href="' +
-        esc(data.pdf) +
-        '" target="_blank">Open PDF</a></div>',
-    );
-    const a = document.createElement("a");
-    a.href = data.pdf;
-    a.download = "";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+  } finally {
+    isRendering = false;
+    renderPlan(lastPlan);
+  }
+}
+async function writePDF() {
+  if (!lastPlan) return;
+  const ordered = lastPlan.pages
+    .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
+    .filter(Boolean);
+  if (ordered.length !== lastPlan.pages.length) {
+    $("renderStatus").textContent =
+      "Not all pages rendered (" +
+      ordered.length +
+      " of " +
+      lastPlan.pages.length +
+      ").";
+    return;
+  }
+  $("renderStatus").textContent = "Writing PDF…";
+  const res = await fetch("/api/write-pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: $("title").value,
+      images: ordered,
+      workspace,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    $("renderStatus").textContent = data.error || "PDF failed";
+    return;
+  }
+  $("renderStatus").innerHTML =
+    'Done. <a href="' + esc(data.pdf) + '" target="_blank">Open PDF</a>';
+  const a = document.createElement("a");
+  a.href = data.pdf;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+function updateWritePdfButton() {
+  const btn = $("writePdfBtn");
+  if (!btn) return;
+  const allRendered =
+    !!lastPlan &&
+    lastPlan.pages.length > 0 &&
+    lastPlan.pages.every((p) => renderedImages[p.number]);
+  btn.classList.toggle("hidden", !allRendered || isRendering);
+}
+function wireRegenButtons() {
+  document.querySelectorAll("[data-regen-num]").forEach((btn) => {
+    btn.onclick = (e) => {
+      const num = +e.currentTarget.dataset.regenNum;
+      regenerateSinglePage(num);
+    };
+  });
+}
+async function regenerateSinglePage(pageNum) {
+  if (isRendering || !lastPlan) return;
+  const page = lastPlan.pages.find((p) => p.number === pageNum);
+  if (!page) return;
+  isRendering = true;
+  delete renderedImages[pageNum];
+  renderPlan(lastPlan);
+  try {
+    const task = await startRenderPageTask(page, "");
+    const done = await waitForTask(workspace, task.taskId);
+    finishRenderPageTask(done, page);
+  } catch (e) {
+    setStatus(pageNum, e.message || "Regen failed");
   } finally {
     isRendering = false;
     renderPlan(lastPlan);
@@ -1854,11 +1909,17 @@ function normalizeIssue(issue) {
     String(now.getDate()).padStart(2, "0");
   const start = new Date(now.getFullYear(), 0, 0);
   const day = Math.floor((local - start) / 86400000);
+  const userNum = $("issueNumber") && $("issueNumber").value.trim();
+  const userDate = $("issueDate") && $("issueDate").value.trim();
   const out = Object.assign({}, issue || {});
   out.year = parseInt(out.year || now.getFullYear(), 10);
-  out.number = parseInt(out.number || day, 10);
-  out.date = String(out.date || iso);
-  out.label = String(out.label || "Issue " + out.number + ", " + out.year);
+  out.number = userNum ? parseInt(userNum, 10) : parseInt(out.number || day, 10);
+  out.date = userDate || String(out.date || iso);
+  if (userNum || userDate) {
+    out.label = "Issue " + out.number + ", " + out.year;
+  } else {
+    out.label = String(out.label || "Issue " + out.number + ", " + out.year);
+  }
   return out;
 }
 function pageModules(page) {
@@ -1968,6 +2029,8 @@ async function restoreWorkspaceState() {
         if (s.referencePath) referencePath = s.referencePath;
         if (s.referencePath) $("reference").value = referencePath;
         if (s.enhancedJson) setEnhancedStyleJson(s.enhancedJson);
+        if (s.issueNumber && $("issueNumber")) $("issueNumber").value = s.issueNumber;
+        if (s.issueDate && $("issueDate")) $("issueDate").value = s.issueDate;
       } catch (_) {}
     }
 
@@ -2078,50 +2141,13 @@ async function resumeRenderPhase(runningRenderTasks) {
     if (remaining.length > 0) {
       await renderPageQueue(remaining, 3);
     }
-    const ordered = lastPlan.pages
-      .map((p) => renderedImages[p.number] && renderedImages[p.number].image)
-      .filter(Boolean);
-    if (ordered.length !== lastPlan.pages.length) {
-      throw new Error(
-        "Missing rendered pages: expected " +
-          lastPlan.pages.length +
-          ", got " +
-          ordered.length,
-      );
-    }
-    setRenderProgress("Writing PDF");
-    const res = await fetch("/api/write-pdf", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: $("title").value,
-        images: ordered,
-        workspace,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      $("renderStatus").textContent = data.error || "PDF failed";
-      return;
-    }
-    completeRenderCall("PDF ready");
+    const rendered = Object.keys(renderedImages).length;
+    completeRenderCall("All pages rendered");
     setProgress(
       "renderProgress",
       100,
-      "Done. Download should start automatically.",
+      "All " + rendered + " pages rendered. Click below to write the PDF.",
     );
-    $("renderStatus").insertAdjacentHTML(
-      "beforeend",
-      '<div class="status"><a href="' +
-        esc(data.pdf) +
-        '" target="_blank">Open PDF</a></div>',
-    );
-    const a = document.createElement("a");
-    a.href = data.pdf;
-    a.download = "";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
   } catch (e) {
     $("renderStatus").textContent = e.message || "Render failed";
   } finally {

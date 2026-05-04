@@ -112,6 +112,14 @@
                 </select>
               </div>
               <div class="field">
+                <label>Issue number <span style="font-weight:normal;opacity:.6">(optional)</span></label
+                ><input id="issueNumber" type="number" min="1" placeholder="auto" />
+              </div>
+              <div class="field">
+                <label>Issue date <span style="font-weight:normal;opacity:.6">(optional)</span></label
+                ><input id="issueDate" type="text" placeholder="auto (e.g. May 2026)" />
+              </div>
+              <div class="field">
                 <label>Reference image URL</label>
                 <input
                   id="reference"
@@ -240,18 +248,19 @@
             </div>
           </div>
           <div id="renderToolbar" class="toolbar hidden">
-            <button id="render" class="secondary">Download PDF</button
+            <button id="render" class="secondary">Render Issue</button
             ><button id="downloadPdfJson" class="ghost">Download JSON</button>
           </div>
           <div id="renderStatus" class="status"></div>
           <section id="renderOutput" class="results"></section>
           <div class="step-actions">
             <button class="ghost" id="backPlan">Back</button
-            ><button id="renderSide" class="secondary">Download PDF</button>
+            ><button id="renderSide" class="secondary">Render Issue</button
+            ><button id="writePdfBtn" class="secondary hidden">Looks good — write PDF</button>
           </div>
         </div>
       </section>
     </div>
-    <script src="/static/app.js?v=20260428-1"></script>
+    <script src="/static/app.js?v=20260504-2"></script>
   </body>
 </html>
