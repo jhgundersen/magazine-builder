@@ -101,6 +101,116 @@ type imageCandidate struct {
 
 var fetchURLTextFunc = fetchURLText
 
+func fetchURLContent(ctx context.Context, rawURL string, maxBytes int64) ([]byte, string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil, "", errors.New("missing URL")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("User-Agent", "magazine-builder/0.1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("fetch returned HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return nil, "", err
+	}
+	return data, resp.Header.Get("Content-Type"), nil
+}
+
+func isRSSLike(data []byte, contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch ct {
+	case "application/rss+xml", "application/atom+xml", "application/xml",
+		"text/xml", "application/x-rss+xml":
+		return true
+	case "text/html", "text/plain":
+		return false
+	}
+	n := min(len(data), 512)
+	sniff := strings.ToLower(strings.TrimSpace(string(data[:n])))
+	return strings.HasPrefix(sniff, "<?xml") ||
+		strings.HasPrefix(sniff, "<rss") ||
+		strings.HasPrefix(sniff, "<feed")
+}
+
+func extractHTMLPageArticle(_ context.Context, rawURL string, data []byte) article {
+	extracted := extractLikelyArticle(string(data))
+	return article{
+		Title:  extracted.Title,
+		Body:   extracted.Body,
+		Source: rawURL,
+		Images: extractImageURLs(extracted.Markup, rawURL),
+	}
+}
+
+func parseGitHubReleaseURL(rawURL string) (owner, repo, tag string, ok bool) {
+	s := strings.TrimSpace(rawURL)
+	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
+		if !strings.HasPrefix(s, prefix) {
+			continue
+		}
+		path := strings.TrimPrefix(s, prefix)
+		path = strings.Split(strings.Split(path, "?")[0], "#")[0]
+		parts := strings.SplitN(path, "/", 5)
+		if len(parts) == 5 && parts[2] == "releases" && parts[3] == "tag" && parts[4] != "" {
+			return parts[0], parts[1], parts[4], true
+		}
+		return "", "", "", false
+	}
+	return "", "", "", false
+}
+
+type gitHubRelease struct {
+	Name        string `json:"name"`
+	TagName     string `json:"tag_name"`
+	Body        string `json:"body"`
+	HTMLURL     string `json:"html_url"`
+	PublishedAt string `json:"published_at"`
+}
+
+func fetchGitHubReleaseNotes(ctx context.Context, rawURL string) (gitHubRelease, error) {
+	owner, repo, tag, ok := parseGitHubReleaseURL(rawURL)
+	if !ok {
+		return gitHubRelease{}, fmt.Errorf("not a GitHub release URL: %q", rawURL)
+	}
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, tag)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return gitHubRelease{}, err
+	}
+	req.Header.Set("User-Agent", "magazine-builder/0.1")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return gitHubRelease{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return gitHubRelease{}, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return gitHubRelease{}, err
+	}
+	var release gitHubRelease
+	if err := json.Unmarshal(data, &release); err != nil {
+		return gitHubRelease{}, err
+	}
+	if release.HTMLURL == "" {
+		release.HTMLURL = rawURL
+	}
+	return release, nil
+}
+
 func fetchRSS(ctx context.Context, feedURL string, offset, limit int) ([]article, error) {
 	feedURL = strings.TrimSpace(feedURL)
 	if feedURL == "" {
@@ -112,23 +222,14 @@ func fetchRSS(ctx context.Context, feedURL string, offset, limit int) ([]article
 	if limit <= 0 {
 		limit = 10
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	data, _, err := fetchURLContent(ctx, feedURL, 8<<20)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "magazine-builder/0.1")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("RSS fetch returned HTTP %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, err
-	}
+	return parseRSSContent(ctx, feedURL, data, offset, limit)
+}
+
+func parseRSSContent(ctx context.Context, feedURL string, data []byte, offset, limit int) ([]article, error) {
 	var feed rssFeed
 	if err := xml.Unmarshal(data, &feed); err != nil {
 		return nil, err

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -269,6 +270,162 @@ func (s *server) summarizePodcastForImport(ctx context.Context, a article, style
 	return a, nil
 }
 
+type articleBrief struct {
+	Title     string   `json:"title"`
+	Focus     string   `json:"focus"`
+	KeyPoints []string `json:"keyPoints"`
+}
+
+// planReleaseArticles decides how many articles a GitHub release warrants and
+// returns one brief per article. Fast call: small output, no prose.
+func (s *server) planReleaseArticles(ctx context.Context, release gitHubRelease, style magazineStyle) ([]articleBrief, error) {
+	releaseName := strings.TrimSpace(emptyDefault(release.Name, release.TagName))
+	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of 1-6 objects. Each object must have: title (draft magazine title), focus (one sentence on what this article covers), keyPoints (array of 2-4 concrete facts or angles to include). Analyze this software release note and decide how many distinct magazine articles to write — one per major feature, improvement or theme. Minor bug fixes only count if they tell a larger story. Do not write the articles yet, just plan them.\n\nPUBLICATION STYLE: %s\n\nRELEASE: %s\nSOURCE URL: %s\nRELEASE NOTES:\n%s",
+		styleLine(style, "article"), releaseName, release.HTMLURL, compact(release.Body, 6000))
+	var out struct {
+		Articles []articleBrief `json:"articles"`
+	}
+	if err := s.runDefapiTextJSON(ctx, prompt, 2000, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Articles) == 0 {
+		return nil, errors.New("release planning returned no article briefs")
+	}
+	return out.Articles, nil
+}
+
+// planPageArticles decides how many articles a generic web page warrants and
+// returns one brief per article.
+func (s *server) planPageArticles(ctx context.Context, a article, style magazineStyle) ([]articleBrief, error) {
+	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of 1-5 objects. Each object must have: title (draft magazine title), focus (one sentence on what this article covers), keyPoints (array of 2-4 concrete facts or angles to include). Analyze this web page content and decide how many distinct magazine articles to write — a simple article becomes 1, a roundup or page with multiple distinct topics may become 2-5. Do not write the articles yet, just plan them.\n\nPUBLICATION STYLE: %s\n\nPAGE TITLE: %s\nSOURCE URL: %s\nPAGE CONTENT:\n%s",
+		styleLine(style, "article"), emptyDefault(a.Title, "Untitled"), a.Source, compact(a.Body, 6000))
+	var out struct {
+		Articles []articleBrief `json:"articles"`
+	}
+	if err := s.runDefapiTextJSON(ctx, prompt, 2000, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Articles) == 0 {
+		return nil, errors.New("page planning returned no article briefs")
+	}
+	return out.Articles, nil
+}
+
+// writeArticleFromBrief turns one planned brief into a finished magazine article.
+func (s *server) writeArticleFromBrief(ctx context.Context, brief articleBrief, sourceContext string, style magazineStyle) (article, error) {
+	lengthNote := strings.TrimSpace(style.ArticleLength)
+	if lengthNote == "" {
+		lengthNote = "Use coherent paragraphs appropriate for the publication style."
+	}
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Write a print-ready magazine article in the publication's editorial voice. Focus on reader benefit and real-world impact. Avoid changelog or web language. Body length: %s.\n\nPUBLICATION STYLE: %s\n\nARTICLE PLAN:\nTitle: %s\nFocus: %s\nKey points: %s\n\nSOURCE CONTEXT:\n%s",
+		lengthNote, styleLine(style, "article"),
+		brief.Title, brief.Focus, strings.Join(brief.KeyPoints, "; "),
+		sourceContext)
+	var out struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := s.runDefapiTextJSON(ctx, prompt, 3000, &out); err != nil {
+		return article{}, err
+	}
+	return article{
+		Title:    cleanText(emptyDefault(out.Title, brief.Title)),
+		Body:     cleanText(out.Body),
+		Enhanced: true,
+	}, nil
+}
+
+func (s *server) splitReleaseForMagazine(ctx context.Context, release gitHubRelease, style magazineStyle) ([]article, error) {
+	if strings.TrimSpace(release.Body) == "" {
+		return nil, errors.New("GitHub release has no body content")
+	}
+
+	// Call 1: plan — fast, decides count and structure, no prose.
+	briefs, err := s.planReleaseArticles(ctx, release, style)
+	if err != nil {
+		return nil, fmt.Errorf("release planning: %w", err)
+	}
+
+	// Call 2+: write each article in parallel, sharing compact source context.
+	sourceContext := fmt.Sprintf("Release: %s\nURL: %s\nRelease notes:\n%s",
+		strings.TrimSpace(emptyDefault(release.Name, release.TagName)),
+		release.HTMLURL,
+		compact(release.Body, 4000))
+
+	articles := make([]article, len(briefs))
+	errs := make([]error, len(briefs))
+	parallelMap(len(briefs), len(briefs), func(i int) {
+		a, err := s.writeArticleFromBrief(ctx, briefs[i], sourceContext, style)
+		if err != nil {
+			errs[i] = err
+			return
+		}
+		a.Source = release.HTMLURL
+		articles[i] = a
+	})
+
+	out := make([]article, 0, len(articles))
+	for i, a := range articles {
+		if errs[i] != nil {
+			log.Printf("splitReleaseForMagazine: write failed for %q: %v", briefs[i].Title, errs[i])
+			continue
+		}
+		if a.Title != "" || a.Body != "" {
+			out = append(out, a)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("all article writes failed for release")
+	}
+	return cleanArticles(out), nil
+}
+
+func (s *server) splitPageForMagazine(ctx context.Context, a article, style magazineStyle) ([]article, error) {
+	if strings.TrimSpace(a.Body) == "" {
+		return nil, errors.New("no usable content found at URL")
+	}
+
+	// Call 1: plan — fast, decides count and structure, no prose.
+	briefs, err := s.planPageArticles(ctx, a, style)
+	if err != nil {
+		return nil, fmt.Errorf("page planning: %w", err)
+	}
+
+	// Call 2+: write each article in parallel, sharing compact source context.
+	sourceContext := fmt.Sprintf("Page title: %s\nURL: %s\nContent:\n%s",
+		emptyDefault(a.Title, "Untitled"), a.Source, compact(a.Body, 4000))
+
+	articles := make([]article, len(briefs))
+	errs := make([]error, len(briefs))
+	parallelMap(len(briefs), len(briefs), func(i int) {
+		art, err := s.writeArticleFromBrief(ctx, briefs[i], sourceContext, style)
+		if err != nil {
+			errs[i] = err
+			return
+		}
+		art.Source = a.Source
+		if len(art.Images) == 0 && len(a.Images) > 0 {
+			art.Images = a.Images
+		}
+		articles[i] = art
+	})
+
+	out := make([]article, 0, len(articles))
+	for i, art := range articles {
+		if errs[i] != nil {
+			log.Printf("splitPageForMagazine: write failed for %q: %v", briefs[i].Title, errs[i])
+			continue
+		}
+		if art.Title != "" || art.Body != "" {
+			out = append(out, art)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("all article writes failed for page")
+	}
+	return cleanArticles(out), nil
+}
+
 func (s *server) generateArticles(ctx context.Context, title string, style magazineStyle, count int) ([]article, error) {
 	var out struct {
 		Articles []article `json:"articles"`
@@ -370,7 +527,7 @@ func (s *server) pagePromptWithFurniture(ctx context.Context, style magazineStyl
 func (s *server) runDefapiText(ctx context.Context, prompt string, maxTokens int) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.DefapiTextTimeout)
 	defer cancel()
-	args := commandArgs(s.cfg.DefapiTextCategory, textModelFromContext(ctx, s.cfg.DefapiTextModel), "--stream=false", "-max-tokens", strconv.Itoa(maxTokens), prompt)
+	args := commandArgs(s.cfg.DefapiTextCategory, textModelFromContext(ctx, s.cfg.DefapiTextModel), "--stream=false", "-max-tokens", strconv.Itoa(maxTokens))
 	cmd := exec.CommandContext(cctx, s.cfg.DefapiTextCmd, args...)
 	cmd.Env = commandEnv(ctx)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -464,11 +621,12 @@ func (s *server) runDefapiImage(ctx context.Context, workspace string, pageNumbe
 	for _, ref := range refs {
 		args = append(args, "-image", ref)
 	}
-	s.workspaceLog(workspace, "defapi image: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(prompt)), len(images), len(refs))
-	args = append(commandArgs(s.cfg.DefapiImageCategory, imageModelFromContext(ctx, s.cfg.DefapiImageModel)), append(args, smartLimitImagePrompt(prompt, s.cfg.DefapiImageMaxPromptChars))...)
+	imagePrompt := smartLimitImagePrompt(prompt, s.cfg.DefapiImageMaxPromptChars)
+	s.workspaceLog(workspace, "defapi image: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(imagePrompt)), len(images), len(refs))
+	args = append(commandArgs(s.cfg.DefapiImageCategory, imageModelFromContext(ctx, s.cfg.DefapiImageModel)), args...)
 	cmd := exec.CommandContext(cctx, s.cfg.DefapiImageCmd, args...)
 	cmd.Env = commandEnv(ctx)
-	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stdin = strings.NewReader(imagePrompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

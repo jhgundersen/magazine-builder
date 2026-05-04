@@ -301,56 +301,101 @@ func (s *server) runImportRSSTask(db *sql.DB, workspace, taskID string, req rssR
 			taskLogErr("runImportRSSTask failTask", failTask(db, taskID, taskErr.Error()))
 		}
 	}()
-	s.workspaceLog(workspace, "rss-import: start url=%q offset=%d limit=%d", req.URL, req.Offset, req.Limit)
-	articles, err := fetchRSS(ctx, req.URL, req.Offset, req.Limit)
+
+	style := parseStyle(req.Style)
+	s.workspaceLogJSON(workspace, "rss-import: style JSON", style)
+
+	// Path 1: GitHub release URL — fetch via API, AI split + rewrite in one shot.
+	if _, _, _, ok := parseGitHubReleaseURL(req.URL); ok {
+		s.workspaceLog(workspace, "rss-import: github-release url=%q", req.URL)
+		release, err := fetchGitHubReleaseNotes(ctx, req.URL)
+		if err != nil {
+			s.workspaceLog(workspace, "rss-import: github fetch failed: %v", err)
+			taskErr = err
+			return
+		}
+		articles, err := s.splitReleaseForMagazine(ctx, release, style)
+		if err != nil {
+			s.workspaceLog(workspace, "rss-import: github split failed: %v", err)
+			taskErr = err
+			return
+		}
+		s.workspaceLogJSON(workspace, "rss-import: github release articles", articleLogEntries(articles, true))
+		s.workspaceLog(workspace, "rss-import: complete articles=%d (github-release)", len(articles))
+		taskErr = completeTask(db, taskID, taskJSONOutput(map[string]any{"articles": articles, "workspace": workspace}))
+		return
+	}
+
+	// Fetch URL content once; subsequent paths use the same bytes.
+	s.workspaceLog(workspace, "rss-import: fetch url=%q", req.URL)
+	data, contentType, err := fetchURLContent(ctx, req.URL, 12<<20)
 	if err != nil {
 		s.workspaceLog(workspace, "rss-import: fetch failed: %v", err)
 		taskErr = err
 		return
 	}
-	style := parseStyle(req.Style)
-	s.workspaceLogJSON(workspace, "rss-import: style JSON", style)
-	rawEntries := make([]articleLogEntry, len(articles))
-	for i, a := range articles {
-		rawEntries[i] = articleLogEntryFromArticle(i, a, false)
-	}
-	s.workspaceLogJSON(workspace, "rss-import: extracted articles", rawEntries)
-	rewriteEntries := make([]articleLogEntry, len(articles))
-	parallelMap(len(articles), 3, func(i int) {
-		if articles[i].Kind == "podcast" && len([]rune(articles[i].Body)) > 5000 {
-			summarized, err := s.summarizePodcastForImport(ctx, articles[i], style)
-			if err != nil {
-				log.Printf("defapi text podcast summary failed for %q: %v", articles[i].Title, err)
-				rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], false)
-				rewriteEntries[i].Error = fmt.Sprintf("podcast summary failed: %v", err)
-				articles[i].Body = sampleLongText(articles[i].Body, 4800)
-			} else {
-				articles[i].Title = summarized.Title
-				articles[i].Body = summarized.Body
-			}
-		}
-		improved, err := s.rewriteArticleForStyle(ctx, articles[i], style)
+
+	// Path 2: RSS / Atom feed — parse XML, then rewrite each article for style.
+	if isRSSLike(data, contentType) {
+		s.workspaceLog(workspace, "rss-import: rss/atom content_type=%q offset=%d limit=%d", contentType, req.Offset, req.Limit)
+		articles, err := parseRSSContent(ctx, req.URL, data, req.Offset, req.Limit)
 		if err != nil {
-			log.Printf("defapi text article rewrite failed for %q: %v", articles[i].Title, err)
-			rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], false)
-			if rewriteEntries[i].Error != "" {
-				rewriteEntries[i].Error += "; "
-			}
-			rewriteEntries[i].Error += fmt.Sprintf("article rewrite failed: %v", err)
+			s.workspaceLog(workspace, "rss-import: rss parse failed: %v", err)
+			taskErr = err
 			return
 		}
-		articles[i].Title = improved.Title
-		articles[i].Body = improved.Body
-		articles[i].Enhanced = true
-		rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], true)
-	})
-	for i := range rewriteEntries {
-		if rewriteEntries[i].Title == "" && rewriteEntries[i].Body == "" && rewriteEntries[i].Error == "" {
+		s.workspaceLogJSON(workspace, "rss-import: extracted articles", articleLogEntries(articles, false))
+		rewriteEntries := make([]articleLogEntry, len(articles))
+		parallelMap(len(articles), 3, func(i int) {
+			if articles[i].Kind == "podcast" && len([]rune(articles[i].Body)) > 5000 {
+				summarized, err := s.summarizePodcastForImport(ctx, articles[i], style)
+				if err != nil {
+					log.Printf("defapi text podcast summary failed for %q: %v", articles[i].Title, err)
+					rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], false)
+					rewriteEntries[i].Error = fmt.Sprintf("podcast summary failed: %v", err)
+					articles[i].Body = sampleLongText(articles[i].Body, 4800)
+				} else {
+					articles[i].Title = summarized.Title
+					articles[i].Body = summarized.Body
+				}
+			}
+			improved, err := s.rewriteArticleForStyle(ctx, articles[i], style)
+			if err != nil {
+				log.Printf("defapi text article rewrite failed for %q: %v", articles[i].Title, err)
+				rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], false)
+				if rewriteEntries[i].Error != "" {
+					rewriteEntries[i].Error += "; "
+				}
+				rewriteEntries[i].Error += fmt.Sprintf("article rewrite failed: %v", err)
+				return
+			}
+			articles[i].Title = improved.Title
+			articles[i].Body = improved.Body
+			articles[i].Enhanced = true
 			rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], true)
+		})
+		for i := range rewriteEntries {
+			if rewriteEntries[i].Title == "" && rewriteEntries[i].Body == "" && rewriteEntries[i].Error == "" {
+				rewriteEntries[i] = articleLogEntryFromArticle(i, articles[i], true)
+			}
 		}
+		s.workspaceLogJSON(workspace, "rss-import: rewritten articles", rewriteEntries)
+		s.workspaceLog(workspace, "rss-import: complete articles=%d rewritten=%d (rss)", len(articles), countEnhancedArticles(articles))
+		taskErr = completeTask(db, taskID, taskJSONOutput(map[string]any{"articles": articles, "workspace": workspace}))
+		return
 	}
-	s.workspaceLogJSON(workspace, "rss-import: rewritten articles", rewriteEntries)
-	s.workspaceLog(workspace, "rss-import: complete articles=%d rewritten=%d", len(articles), countEnhancedArticles(articles))
+
+	// Path 3: Generic HTML page — extract content, AI split + rewrite in one shot.
+	s.workspaceLog(workspace, "rss-import: html-page content_type=%q url=%q", contentType, req.URL)
+	pageArticle := extractHTMLPageArticle(ctx, req.URL, data)
+	articles, err := s.splitPageForMagazine(ctx, pageArticle, style)
+	if err != nil {
+		s.workspaceLog(workspace, "rss-import: page split failed: %v", err)
+		taskErr = err
+		return
+	}
+	s.workspaceLogJSON(workspace, "rss-import: html page articles", articleLogEntries(articles, true))
+	s.workspaceLog(workspace, "rss-import: complete articles=%d (html-page)", len(articles))
 	taskErr = completeTask(db, taskID, taskJSONOutput(map[string]any{"articles": articles, "workspace": workspace}))
 }
 

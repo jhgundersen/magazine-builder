@@ -165,8 +165,8 @@
           </div>
           <div class="article-tools">
             <div>
-              <label>RSS or Atom feed URL</label
-              ><input id="rss" placeholder="https://example.com/feed.xml" />
+              <label>URL — RSS/Atom feed, GitHub release, or any web page</label
+              ><input id="rss" placeholder="https://example.com/feed.xml · github.com/…/releases/tag/v1.0 · any article URL" />
               <div id="rssStatus" class="status"></div>
             </div>
             <div>
@@ -182,8 +182,8 @@
             <button id="importRSS">Import latest</button>
           </div>
           <div class="toolbar">
-            <button id="generateArticles" class="secondary">
-              Generate Articles</button
+            <input id="generateCount" type="number" min="1" max="12" value="4" title="Number of articles to generate (1–12)" style="width:4em;flex:none"
+            ><button id="generateArticles" class="secondary">Generate Articles</button
             ><button id="addArticle" class="ghost">Add Article</button
             ><button id="addFeature" class="ghost">Add Feature Page</button
             ><button id="addPoster" class="ghost">Add Poster</button

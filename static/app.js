@@ -498,7 +498,7 @@ $("generateArticles").onclick = (e) =>
       body: JSON.stringify({
         title: $("title").value,
         style: styleJsonValue(),
-        count: 4,
+        count: Math.max(1, Math.min(12, parseInt(($("generateCount") && $("generateCount").value) || "4", 10))),
         workspace,
         apiKey,
         textModel,
