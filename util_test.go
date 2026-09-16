@@ -93,3 +93,14 @@ func TestEmptyDefaultReturnsDefault(t *testing.T) {
 		t.Fatalf("expected value, got %q", got)
 	}
 }
+
+func TestSmartLimitPreservesEssentialContentWhenBudgetCannotFit(t *testing.T) {
+	raw := compactJSON(map[string]any{
+		"content":     map[string]any{"brief_body": strings.Repeat("Story text. ", 100)},
+		"constraints": []string{"no invented quotes"},
+	})
+	got := smartLimitImagePrompt(raw, 100)
+	if !json.Valid([]byte(got)) || got != raw {
+		t.Fatal("essential content must remain intact for the render caller to reject an insufficient budget")
+	}
+}

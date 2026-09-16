@@ -476,7 +476,7 @@ func (s *server) generateCoverPlan(ctx context.Context, title string, style maga
 }
 
 func (s *server) generatePageFurniture(ctx context.Context, style magazineStyle, page pagePlan, issue issueContext) (pageFurniture, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys header and footer. Write very short localized magazine page furniture in %s. Tone: %s.\n\nHeader: a section or department slug, 2-4 words maximum — e.g. \"Features\", \"Interview\", \"In Brief\", or the equivalent in the publication language. The header is a section label, never issue metadata.\n\nFooter: 2-5 words to sit beside the page number — typically the publication name or a short section label. Never repeat the year, issue number, or date in the footer unless the publication style explicitly uses issue info in footers.\n\nUse the page kind and article title to pick an appropriate section slug. Match this publication style: %s.\n\nPAGE KIND: %s\nPAGE TITLE: %s\nPAGE BODY: %s", emptyDefault(style.Language, "English"), emptyDefault(style.Tone, "editorial"), styleLine(style, page.Kind), page.Kind, page.Title, pageBodyForFurniture(page))
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys header and footer. Write very short localized magazine page furniture in %s. Tone: %s.\n\nHeader: a section or department slug, 2-4 words maximum — e.g. \"Features\", \"Interview\", \"In Brief\", or the equivalent in the publication language. The header is a section label, never issue metadata.\n\nFooter: 2-5 words to sit beside the page number — typically the publication name or a short section label. Never include the year, issue number, or date in either header or footer.\n\nUse the page kind and article title to pick an appropriate section slug. Match this publication style: %s.\n\nPAGE KIND: %s\nPAGE TITLE: %s\nPAGE BODY: %s", emptyDefault(style.Language, "English"), emptyDefault(style.Tone, "editorial"), styleLine(style, page.Kind), page.Kind, page.Title, pageBodyForFurniture(page))
 	var out pageFurniture
 	if err := s.runDefapiTextJSON(ctx, prompt, 2000, &out); err != nil {
 		return pageFurniture{}, err
@@ -606,6 +606,10 @@ func (s *server) runDefapiImageWithRetry(ctx context.Context, workspace string, 
 }
 
 func (s *server) runDefapiImage(ctx context.Context, workspace string, pageNumber int, prompt string, images []string) (generatedImage, error) {
+	imagePrompt := smartLimitImagePrompt(prompt, s.cfg.DefapiImageMaxPromptChars)
+	if max := s.cfg.DefapiImageMaxPromptChars; max > 0 && len([]rune(imagePrompt)) > max {
+		return generatedImage{}, fmt.Errorf("image prompt needs %d characters after trimming optional style text; limit is %d: shorten the page content or increase -defapi-image-max-prompt-chars", len([]rune(imagePrompt)), max)
+	}
 	cctx, cancel := context.WithTimeout(ctx, s.cfg.DefapiImageTimeout)
 	defer cancel()
 	filename := fmt.Sprintf("page-%02d-%d.jpg", pageNumber, time.Now().UnixNano())
@@ -621,7 +625,6 @@ func (s *server) runDefapiImage(ctx context.Context, workspace string, pageNumbe
 	for _, ref := range refs {
 		args = append(args, "-image", ref)
 	}
-	imagePrompt := smartLimitImagePrompt(prompt, s.cfg.DefapiImageMaxPromptChars)
 	s.workspaceLog(workspace, "defapi image: page=%d prompt_chars=%d input_refs=%d accepted_refs=%d", pageNumber, len([]rune(imagePrompt)), len(images), len(refs))
 	args = append(commandArgs(s.cfg.DefapiImageCategory, imageModelFromContext(ctx, s.cfg.DefapiImageModel)), args...)
 	cmd := exec.CommandContext(cctx, s.cfg.DefapiImageCmd, args...)

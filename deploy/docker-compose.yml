@@ -7,6 +7,5 @@ services:
     volumes:
       - ./data:/app/magazine-work
     command:
-      - magazine-builder
       - -workdir=/app/magazine-work
       - -workspace-max-age=48h

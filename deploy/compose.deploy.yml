@@ -1,0 +1,6 @@
+# Overlay for /root/website/docker-compose.yml on jonh.no.
+services:
+  magazine-builder:
+    image: magazine-builder:production
+    entrypoint: ["magazine-builder"]
+    command: ["-workdir=/app/magazine-work", "-workspace-max-age=24h"]

@@ -238,8 +238,9 @@ func limitPrompt(s string, max int) string {
 
 // smartLimitImagePrompt reduces the image prompt to max runes, preferring to
 // trim verbose JSON fields (style.visual_system, style.visual_brief,
-// style.creative_kit) before
-// falling back to a hard rune cut.
+// style.creative_kit). Structured prompts that still exceed the budget are
+// returned intact so the caller can report an error instead of sending broken JSON.
+// Plain-text prompts retain the legacy hard-cut behavior.
 func smartLimitImagePrompt(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if max <= 0 || len([]rune(s)) <= max {
@@ -272,6 +273,7 @@ func smartLimitImagePrompt(s string, max int) string {
 				}
 			}
 		}
+		return s
 	}
 	r := []rune(s)
 	return string(r[:max])

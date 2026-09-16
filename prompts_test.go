@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -180,4 +182,42 @@ func pageKinds(pages []pagePlan) []string {
 		kinds[i] = p.Kind
 	}
 	return kinds
+}
+
+func TestMultiPagePromptKeepsCopySeparateFromImageBrief(t *testing.T) {
+	a := article{Title: "Story", Body: "Combined overview", Sections: []articleSection{
+		{Body: "Opening copy", ImageBrief: "Draw the opening scene"},
+		{Body: "Continuation copy", ImageBrief: "Draw the closing scene"},
+	}}
+	for part, section := range a.Sections {
+		prompt := articlePrompt(part+2, "Test", fallbackStyle("", ""), "", "article", a, part+1, 2, issueContext{})
+		var decoded struct {
+			Content struct {
+				Body       string `json:"brief_body"`
+				ImageBrief string `json:"image_brief"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(prompt), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Content.Body != section.Body || decoded.Content.ImageBrief != section.ImageBrief {
+			t.Fatalf("page %d lost its copy or illustration instruction: %s", part+1, prompt)
+		}
+	}
+}
+
+func TestLongImagePromptRemainsValidJSON(t *testing.T) {
+	prompt := imagePromptJSON(map[string]any{"content": strings.Repeat("æøå", 2000), "constraints": []string{"keep these instructions"}})
+	if !json.Valid([]byte(prompt)) || !strings.Contains(prompt, "keep these instructions") {
+		t.Fatal("long prompt was truncated before render-time budgeting")
+	}
+}
+
+func TestRenderRejectsOversizedStructuredPromptBeforeCallingDefapi(t *testing.T) {
+	s := &server{cfg: config{DefapiImageMaxPromptChars: 100}}
+	prompt := imagePromptJSON(map[string]any{"content": strings.Repeat("essential article text ", 100)})
+	_, err := s.runDefapiImage(context.Background(), "test", 2, prompt, nil)
+	if err == nil || !strings.Contains(err.Error(), "limit is 100") {
+		t.Fatalf("expected actionable budget error before rendering, got %v", err)
+	}
 }

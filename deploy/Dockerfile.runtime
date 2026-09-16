@@ -1,0 +1,6 @@
+# Bootstrap this local base from the existing production image (see deploy/README.md).
+# This retains the installed defapi version and runtime dependencies.
+FROM magazine-builder-runtime:base
+COPY --chmod=755 magazine-builder /usr/local/bin/magazine-builder
+ENTRYPOINT ["magazine-builder"]
+CMD ["-workdir=/app/magazine-work", "-workspace-max-age=24h"]

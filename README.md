@@ -12,7 +12,7 @@ It lets a user:
 - generate a compact JSON style guide with separate guidance for cover, content, feature, short article, advert, filler, back page, and template pages
 - generate a style-aware JSON creative kit and per-page prompts for cover, articles, adverts, filler pages, and back page
 - drag/drop middle pages to reorder them while keeping cover and back page fixed
-- render page images with live previews, using the cover plus a shared blank content template as style references
+- render page images with live previews, using a shared brand asset board as a style reference
 - write the rendered pages into a PDF
 
 ## Install
@@ -49,4 +49,10 @@ go run . -defapi-image defapi -defapi-image-category image -defapi-image-model g
 go run . -defapi-image-max-prompt-chars 4000
 ```
 
-The browser orchestrates rendering: cover first, then a non-PDF content template image, then the remaining pages in small parallel batches. Content pages receive the template image as their first style reference.
+The browser orchestrates page rendering. Each page receives its own structured style, palette, issue identity and content instructions. A shared brand asset board carries the masthead, wordmark, issue number mark and divider; posters skip brand assets and page furniture.
+
+## Development and hosting
+
+Run `make check` and `go vet ./...` before submitting changes. Project conventions and the source map are in [AGENTS.md](AGENTS.md).
+
+Production runs at **https://mag.jonh.no** on the existing jonh.no Docker host. [The deployment workflow](.github/workflows/deploy.yml) tests pull requests and deploys tested binaries from `master`. See [deployment setup and rollback](deploy/README.md) for server configuration and GitHub secrets.

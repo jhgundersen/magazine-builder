@@ -159,6 +159,7 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article,
 
 func articlePrompt(n int, title string, style magazineStyle, modules, kind string, a article, part, totalParts int, issue issueContext) string {
 	bodyText := compactPromptText(a.Body, 800)
+	imageBrief := ""
 	seriesNote := ""
 	storyOverview := ""
 	layoutRequired := "headline, deck, byline/source if available, readable columns, image slots, article-specific image text, pull quote/sidebar where useful"
@@ -167,8 +168,8 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 		storyOverview = compactPromptText(a.Body, 400)
 
 		idx := part - 1
-		if idx < len(a.Sections) && strings.TrimSpace(a.Sections[idx].ImageBrief) != "" {
-			bodyText = a.Sections[idx].ImageBrief
+		if idx >= 0 && idx < len(a.Sections) && strings.TrimSpace(a.Sections[idx].Body) != "" {
+			bodyText = a.Sections[idx].Body
 		} else {
 			runes := []rune(a.Body)
 			sliceLen := len(runes) / totalParts
@@ -178,6 +179,10 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 				end = len(runes)
 			}
 			bodyText = compactPromptText(string(runes[start:end]), 400)
+		}
+
+		if idx >= 0 && idx < len(a.Sections) {
+			imageBrief = a.Sections[idx].ImageBrief
 		}
 
 		switch {
@@ -197,6 +202,9 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 		"title":      a.Title,
 		"brief_body": bodyText,
 		"modules":    modules,
+	}
+	if imageBrief != "" {
+		content["image_brief"] = imageBrief
 	}
 	if seriesNote != "" {
 		content["series_note"] = seriesNote
@@ -295,7 +303,7 @@ func posterStylePromptBlock(style magazineStyle) map[string]any {
 }
 
 func imagePromptJSON(v map[string]any) string {
-	return limitPrompt(compactJSON(v), 3900)
+	return compactJSON(v)
 }
 
 func compactJSON(v any) string {

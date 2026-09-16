@@ -1,0 +1,67 @@
+name: Test and deploy magazine
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: magazine-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: make check
+      - run: go vet ./...
+      - name: Build tested commit
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        # Keep version=dev: production updates are controlled by this workflow.
+        run: go build -trimpath -o dist/magazine-builder .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: magazine-builder-linux-amd64
+          path: dist/magazine-builder
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://mag.jonh.no
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: magazine-builder-linux-amd64
+          path: dist
+      - name: Configure deployment SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Deploy tested binary
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "magazine-deploy@$DEPLOY_HOST" deploy < dist/magazine-builder
+      - name: Verify public site serves this commit
+        run: |
+          curl --fail --silent --show-error --retry 5 --retry-all-errors https://mag.jonh.no/static/app.js -o /tmp/live-app.js
+          cmp static/app.js /tmp/live-app.js

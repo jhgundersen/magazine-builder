@@ -11,7 +11,7 @@ INSTALL_LDFLAGS = -ldflags "-X main.version=$(INSTALL_VERSION)"
 .PHONY: fmt test check build run install
 
 fmt:
-	gofmt -w main.go
+	gofmt -w *.go
 	npx prettier --write static/app.js static/app.css static/index.html
 
 test:

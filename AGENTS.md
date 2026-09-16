@@ -164,3 +164,22 @@ Free port 8080 first, then start the app on `:8080`. Do not keep moving to new p
 # Find and stop the process using :8080
 make run ADDR=:8080
 ```
+
+## Hosting and deployment
+
+- Production is **https://mag.jonh.no**, hosted on the existing `jonh.no` server (SSH alias `jonh`, currently `188.166.97.167`). This is a Go service behind nginx, not a static site.
+- Repository: `jhgundersen/magazine-builder`; default branch: **master**.
+- `.github/workflows/deploy.yml` runs `make check` and `go vet`, builds Linux amd64 with CGO disabled, and deploys the tested artifact on pushes to master or manual dispatch. Pull requests only run checks.
+- Use repository secrets `DEPLOY_KEY`, `DEPLOY_KNOWN_HOSTS` and variable `DEPLOY_HOST`. The dedicated `magazine-deploy` SSH account runs only a root-owned deployment helper. Never commit keys.
+- Existing production Compose project: `/root/website/docker-compose.yml`; deployment overlay: `/root/website/magazine-builder/compose.deploy.yml`. Only recreate the `magazine-builder` service. Preserve nginx, certificates, other projects, and `magazine-builder/data`.
+- `deploy/deploy-server.sh` receives a binary on stdin, builds it into the existing runtime, verifies startup and the binary checksum, and rolls back on failure. See `deploy/README.md` for bootstrap and rollback.
+- Production binaries retain `version=dev` to disable the app's independent self-update loop; GitHub Actions owns deployment. The deployed SHA-256 identifies the artifact.
+- Do not use the release-downloading Dockerfile as the GitHub deployment path: it can deploy a different version than the commit that passed checks.
+
+## Working on this project
+
+- Run `make check` (Go tests plus JavaScript syntax) and `go vet ./...` for backend/prompt changes. Format changed Go files with `gofmt`. Add focused regression tests for prompt/data-loss bugs.
+- No paid AI calls are needed for unit tests. Rendered quality needs a separate representative issue review; passing tests alone does not prove typography or image quality.
+- Keep page copy in `content.brief_body` and illustration directions in `content.image_brief`. Multi-page sections must retain their own copy; never substitute the image brief for body text.
+- Preserve valid structured JSON through planning and furniture injection. Apply the configured image prompt budget at render time. If essential content cannot fit, report the budget error instead of cutting JSON or silently discarding instructions.
+- For visual testing, prefer the user's custom Chromium and the installed `browser:control-in-app-browser` skill. Discover the current skill path. The launcher is `/home/jonh/.local/bin/chromium-claude`; profile root is `/home/jonh/.config/chromium-claude` (`Profile 1`).
