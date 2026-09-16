@@ -236,47 +236,52 @@ func limitPrompt(s string, max int) string {
 	return string(r[:max])
 }
 
-// smartLimitImagePrompt reduces the image prompt to max runes, preferring to
-// trim verbose JSON fields (style.visual_system, style.visual_brief,
-// style.creative_kit). Structured prompts that still exceed the budget are
-// returned intact so the caller can report an error instead of sending broken JSON.
-// Plain-text prompts retain the legacy hard-cut behavior.
+// smartLimitImagePrompt removes optional modules and repeated overview before
+// shortening verbose style prose. Copy, illustration directions, identity,
+// palette, furniture and constraints are preserved. If these cannot fit, the
+// caller receives valid oversized JSON and reports an actionable budget error.
 func smartLimitImagePrompt(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if max <= 0 || len([]rune(s)) <= max {
 		return s
 	}
 	var m map[string]any
-	if json.Unmarshal([]byte(s), &m) == nil {
-		style, _ := m["style"].(map[string]any)
-		for _, field := range []string{"visual_system", "visual_brief", "creative_kit"} {
-			if style == nil {
-				break
-			}
-			val, ok := style[field].(string)
-			if !ok {
-				continue
-			}
-			excess := len([]rune(s)) - max
-			newLen := len([]rune(val)) - excess - 20
-			if newLen < 80 {
-				newLen = 80
-			}
-			if newLen < len([]rune(val)) {
-				style[field] = string([]rune(val)[:newLen])
-				m["style"] = style
-				if b, err := json.Marshal(m); err == nil {
-					s = string(b)
-					if len([]rune(s)) <= max {
-						return s
-					}
-				}
-			}
-		}
+	if json.Unmarshal([]byte(s), &m) != nil || m == nil {
+		return limitPrompt(s, max)
+	}
+	// Marshal once to remove input whitespace before sacrificing content.
+	s = compactJSON(m)
+	if len([]rune(s)) <= max {
 		return s
 	}
-	r := []rune(s)
-	return string(r[:max])
+	content, _ := m["content"].(map[string]any)
+	for _, field := range []string{"modules", "story_overview"} {
+		delete(content, field)
+		s = compactJSON(m)
+		if len([]rune(s)) <= max {
+			return s
+		}
+	}
+	style, _ := m["style"].(map[string]any)
+	for _, field := range []string{"creative_kit", "visual_brief", "visual_system"} {
+		val, ok := style[field].(string)
+		if !ok {
+			continue
+		}
+		excess := len([]rune(s)) - max
+		newLen := len([]rune(val)) - excess - 20
+		if newLen < 80 {
+			newLen = 80
+		}
+		if newLen < len([]rune(val)) {
+			style[field] = compactPromptText(val, newLen)
+			s = compactJSON(m)
+			if len([]rune(s)) <= max {
+				return s
+			}
+		}
+	}
+	return s
 }
 
 func uniqueStrings(in []string) []string {

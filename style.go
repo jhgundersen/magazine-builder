@@ -212,10 +212,30 @@ func normalizeStyle(style magazineStyle) magazineStyle {
 	if style.Avoid == "" {
 		style.Avoid = fallback.Avoid
 	}
-	if style.Palette.Primary == "" {
-		style.Palette = fallback.Palette
+	style.Palette = colorPalette{
+		Primary:    normalizePaletteColor(style.Palette.Primary, fallback.Palette.Primary),
+		Secondary:  normalizePaletteColor(style.Palette.Secondary, fallback.Palette.Secondary),
+		Accent:     normalizePaletteColor(style.Palette.Accent, fallback.Palette.Accent),
+		Background: normalizePaletteColor(style.Palette.Background, fallback.Palette.Background),
+		Text:       normalizePaletteColor(style.Palette.Text, fallback.Palette.Text),
 	}
 	return style
+}
+
+func normalizePaletteColor(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if len(value) == 4 && value[0] == '#' {
+		value = fmt.Sprintf("#%c%c%c%c%c%c", value[1], value[1], value[2], value[2], value[3], value[3])
+	}
+	if len(value) != 7 || value[0] != '#' {
+		return fallback
+	}
+	for _, c := range value[1:] {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return fallback
+		}
+	}
+	return strings.ToLower(value)
 }
 
 func fallbackStyle(style, referencePath string) magazineStyle {
@@ -304,9 +324,16 @@ func decodeCreativeKit(text string) (creativeKit, error) {
 	return kit, nil
 }
 
+// Text models receive a structured guide so trailing exclusions and page notes
+// cannot disappear behind a prose character cutoff.
 func styleLine(style magazineStyle, kind string) string {
-	specific := styleLineSpecific(style, kind)
-	return compact(strings.Join([]string{"Language: " + emptyDefault(style.Language, "English"), "Tone: " + emptyDefault(style.Tone, "editorial"), style.Core, style.Typography, style.Color, style.Print, specific, "Avoid: " + style.Avoid}, " "), 900)
+	return compactJSON(map[string]any{
+		"name": style.Name, "language": emptyDefault(style.Language, "English"),
+		"tone": emptyDefault(style.Tone, "editorial"), "core": style.Core,
+		"page_notes": styleLineSpecific(style, kind), "articleLength": style.ArticleLength,
+		"typography": style.Typography, "color_usage": style.Color,
+		"print_treatment": style.Print, "avoid": style.Avoid,
+	})
 }
 
 func styleLineSpecific(style magazineStyle, kind string) string {
@@ -316,12 +343,13 @@ func styleLineSpecific(style magazineStyle, kind string) string {
 	case "feature":
 		return style.Feature
 	case "poster":
-		if strings.TrimSpace(style.Feature) != "" {
-			return "Interior poster image treatment: " + style.Feature
-		}
-		return style.Content
-	case "short", "article":
+		return "Use the shared image treatment for one continuous interior poster; no article grid, panels or magazine furniture."
+	case "brand-assets":
+		return "Use the shared identity for isolated masthead, wordmark, issue number mark and divider; no cover layout or article content."
+	case "short":
 		return style.Short
+	case "article":
+		return style.Content
 	case "advert":
 		return style.Advert
 	case "filler":

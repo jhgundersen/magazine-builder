@@ -141,13 +141,7 @@ func coverPrompt(title, magType string, style magazineStyle, articles []article,
 			"tone":             emptyDefault(style.Tone, "editorial"),
 			"issue":            issue,
 		},
-		"style": map[string]any{
-			"visual_system":   compact(strings.Join(filterStrings([]string{style.Core, style.Content}), " "), 700),
-			"page_notes":      styleLineSpecific(style, "cover"),
-			"typography":      style.Typography,
-			"print_treatment": style.Print,
-			"palette":         style.Palette,
-		},
+		"style": stylePromptBlock(style, "cover"),
 		"content": map[string]any{
 			"masthead":     title,
 			"requirements": "use the supplied issue number/date/year for issue furniture if shown, price/barcode or equivalent cover furniture, strong hierarchy",
@@ -162,7 +156,7 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 	imageBrief := ""
 	seriesNote := ""
 	storyOverview := ""
-	layoutRequired := "headline, deck, byline/source if available, readable columns, image slots, article-specific image text, pull quote/sidebar where useful"
+	layoutRequired := "headline and source attribution if available; body arranged as specified by style.page_notes (columns, panels, lists or other requested format); images and captions; optional deck/sidebar only when appropriate"
 
 	if totalParts > 1 {
 		storyOverview = compactPromptText(a.Body, 400)
@@ -188,13 +182,13 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 		switch {
 		case part == 1:
 			seriesNote = fmt.Sprintf("Page 1 of %d: opening page. Lead with a strong hero image, large headline, deck and the opening section of the story. Leave the continuation for the next page.", totalParts)
-			layoutRequired = "large hero image or illustration, headline, deck, byline, opening body text, page number"
+			layoutRequired = "opening image, headline, opening copy in the guide's format; deck/byline only when appropriate; page number"
 		case part == 3 && totalParts > 4:
 			seriesNote = fmt.Sprintf("Page 3 of %d: visual break. Full-page or near-full-page image related to the story. Minimal text — one short caption or pull quote maximum. No headline repeat.", totalParts)
 			layoutRequired = "dominant full-page image or illustration, single short caption or pull quote, page number"
 		default:
 			seriesNote = fmt.Sprintf("Page %d of %d: continuation. The headline, deck, byline and opening body text already appeared on earlier pages — do not repeat them. Carry the story forward with new body columns, a pull quote drawn from the continuation text, sidebar or closing visual. Use a distinct layout.", part, totalParts)
-			layoutRequired = "body text columns, pull quote or sidebar, closing image or graphic, page number"
+			layoutRequired = "continuation copy in the guide's format, supporting image or graphic, page number; optional quote/sidebar when appropriate"
 		}
 	}
 
@@ -213,7 +207,7 @@ func articlePrompt(n int, title string, style magazineStyle, modules, kind strin
 		content["story_overview"] = storyOverview
 	}
 
-	constraints := []string{"avoid " + style.Avoid}
+	constraints := []string{"avoid " + style.Avoid, "style.page_notes governs content structure; never replace requested panels, puzzles or listings with generic article columns"}
 	if totalParts > 1 {
 		constraints = append(constraints, fmt.Sprintf("visual style (palette, illustration approach, typography) must be consistent across all %d pages of this article", totalParts))
 		if part > 1 {
@@ -287,10 +281,11 @@ func posterPrompt(title string, style magazineStyle, userPrompt string, issue is
 
 func stylePromptBlock(style magazineStyle, kind string) map[string]any {
 	return map[string]any{
-		"visual_system":   compact(strings.Join(filterStrings([]string{style.Core, style.Content}), " "), 700),
+		"visual_system":   style.Core,
 		"page_notes":      styleLineSpecific(style, kind),
 		"typography":      style.Typography,
 		"print_treatment": style.Print,
+		"color_usage":     style.Color,
 		"palette":         style.Palette,
 	}
 }
@@ -435,14 +430,27 @@ func pageBodyForFurniture(page pagePlan) string {
 
 func fallbackPageFurniture(style magazineStyle, page pagePlan) pageFurniture {
 	language := strings.ToLower(emptyDefault(style.Language, "English"))
-	if strings.Contains(language, "norwegian") || strings.Contains(language, "norsk") {
-		if page.Kind == "advert" {
-			return pageFurniture{Header: "Annonse", Footer: "Magasin"}
+	norwegian := strings.Contains(language, "norwegian") || strings.Contains(language, "norsk")
+	header, footer := "Features", "Magazine"
+	if norwegian {
+		header, footer = "Artikler", "Magasin"
+	}
+	switch page.Kind {
+	case "advert":
+		header = "Advert"
+		if norwegian {
+			header = "Annonse"
 		}
-		return pageFurniture{Header: emptyDefault(page.Title, "Innhold"), Footer: "Side"}
+	case "filler":
+		header = "In Brief"
+		if norwegian {
+			header = "Småstoff"
+		}
+	case "back", "back-page":
+		header = "Last Word"
+		if norwegian {
+			header = "Siste ord"
+		}
 	}
-	if page.Kind == "advert" {
-		return pageFurniture{Header: "Advert", Footer: "Magazine"}
-	}
-	return pageFurniture{Header: emptyDefault(page.Title, "Feature"), Footer: "Page"}
+	return pageFurniture{Header: header, Footer: emptyDefault(style.Name, footer)}
 }

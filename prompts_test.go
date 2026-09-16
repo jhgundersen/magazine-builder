@@ -95,17 +95,17 @@ func TestModulePlannerNoCrossKindRepeat(t *testing.T) {
 	}
 }
 
-func TestStyleLineContainsExpectedFields(t *testing.T) {
+func TestStyleLinePreservesStructuredGuide(t *testing.T) {
 	style := fallbackStyle("tech magazine", "")
+	style.Core = strings.Repeat("Long visual instructions. ", 50)
+	style.Avoid = "Never obscure letters with texture"
 	line := styleLine(style, "article")
-
-	for _, want := range []string{"Language:", "Tone:", "Avoid:"} {
-		if !strings.Contains(line, want) {
-			t.Errorf("styleLine missing %q: %s", want, line)
-		}
+	var guide map[string]any
+	if err := json.Unmarshal([]byte(line), &guide); err != nil {
+		t.Fatal(err)
 	}
-	if len([]rune(line)) > 900 {
-		t.Errorf("styleLine exceeds 900 runes: %d", len([]rune(line)))
+	if guide["avoid"] != style.Avoid || guide["page_notes"] != style.Content || guide["articleLength"] != style.ArticleLength {
+		t.Fatalf("structured guide lost its rules: %s", line)
 	}
 }
 
@@ -219,5 +219,47 @@ func TestRenderRejectsOversizedStructuredPromptBeforeCallingDefapi(t *testing.T)
 	_, err := s.runDefapiImage(context.Background(), "test", 2, prompt, nil)
 	if err == nil || !strings.Contains(err.Error(), "limit is 100") {
 		t.Fatalf("expected actionable budget error before rendering, got %v", err)
+	}
+}
+
+func TestFallbackFurnitureUsesDepartmentAndPublication(t *testing.T) {
+	for _, tc := range []struct{ language, kind, header string }{
+		{"Norwegian", "article", "Artikler"}, {"Norsk", "filler", "Småstoff"},
+		{"English", "advert", "Advert"}, {"English", "back-page", "Last Word"},
+	} {
+		got := fallbackPageFurniture(magazineStyle{Name: "My Magazine", Language: tc.language}, pagePlan{Kind: tc.kind, Title: "Issue 42: A very long headline"})
+		if got.Header != tc.header || got.Footer != "My Magazine" {
+			t.Fatalf("unexpected fallback: %#v", got)
+		}
+	}
+}
+
+func TestRepresentativePromptsFitDefaultBudget(t *testing.T) {
+	for _, concept := range []string{"Norwegian comic", "technical magazine"} {
+		style := fallbackStyle(concept, "")
+		a := article{Title: "A longer story", Body: strings.Repeat("Useful source facts. ", 65), Pages: 2, Sections: []articleSection{
+			{Body: strings.Repeat("Opening copy. ", 80), ImageBrief: "The recurring character stands beside a blue machine."},
+			{Body: strings.Repeat("Closing copy. ", 80), ImageBrief: "The same character repairs the blue machine."},
+		}}
+		issue := issueContext{Number: 42, Year: 2026, Date: "2026-09-16", Label: "Issue 42"}
+		for kind, raw := range map[string]string{
+			"cover":   coverPrompt("Test Magazine", "magazine", style, nil, issue),
+			"feature": articlePrompt(2, "Test Magazine", style, strings.Repeat("Optional sidebar. ", 20), "feature", a, 1, 2, issue),
+			"poster":  posterPrompt("Test Magazine", style, "A detailed woodcut of the sea", issue),
+			"filler":  genericPrompt(4, "Test Magazine", style, "Reader letters and a quiz", "filler", "Create a department page", issue),
+		} {
+			var data map[string]any
+			if err := json.Unmarshal([]byte(raw), &data); err != nil {
+				t.Fatal(err)
+			}
+			if kind != "cover" && kind != "poster" {
+				data["page_furniture"] = map[string]any{"header": "Features", "footer": "Test Magazine", "page": 2, "folio_position": "left outer footer edge"}
+			}
+			bounded := smartLimitImagePrompt(compactJSON(data), 3990)
+			if !json.Valid([]byte(bounded)) || len([]rune(bounded)) > 3990 {
+				t.Fatalf("%s %s cannot fit: %d characters", concept, kind, len([]rune(bounded)))
+			}
+			t.Logf("%s %s: %d characters", concept, kind, len([]rune(bounded)))
+		}
 	}
 }

@@ -27,7 +27,25 @@ func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath s
 	if err != nil {
 		return magazineStyle{}, err
 	}
-	prompt := "Return only valid compact JSON. No markdown, no prose. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, articleLength, typography, color, print, avoid, palette. Keep every string value under 220 characters. name must be exactly " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + ". Use this compact brief as the source of truth. Preserve strong formats such as comics, satire, tabloids, puzzles or parody; do not normalize them into a generic magazine. Make articleLength practical for article rewrite prompts. The palette key must be a JSON object with exactly five keys: primary, secondary, accent, background, text — each a CSS hex color string (e.g. \"#1a2b3c\") that reflects the publication's visual identity derived from the style brief.\n\nBRIEF JSON:\n" + compactJSON(brief)
+	prompt := `Return only valid compact JSON. No markdown or prose. Required keys: name, language, tone, core, cover, content, feature, short, advert, filler, back, articleLength, typography, color, print, avoid, palette.
+Design a reusable publication system, not a description of one sample page. The original user request takes precedence over the inferred brief. Preserve explicit language, era, medium, audience, humor and unusual formats (comics, satire, tabloids, puzzles, parody). Do not turn them into a generic magazine.
+Keep each descriptive string under 220 characters. Give concrete, compatible instructions; avoid vague adjectives and repeating the same rules across fields.
+Field responsibilities:
+- core: shared illustration/photo treatment, shapes and recurring visual motifs; no page layout or furniture.
+- tone: editorial voice and rhythm, including humor and what it targets.
+- cover: masthead hierarchy, main image and cover-line arrangement.
+- content: normal article structure, grid or panels, image/text balance and reading order.
+- feature: a distinct larger story treatment within the same visual system.
+- short: compact stories or strips; do not apply this density to all articles.
+- advert, filler, back: distinct layouts and reusable module treatments suitable for this publication; adverts use fictional brands.
+- typography: headline, body and caption roles, relative hierarchy and readable lettering.
+- palette: exactly primary, secondary, accent, background, text, each a six-digit CSS hex color. Derive them from the requested identity; keep text legible against its background.
+- color: explain where palette roles are used and how sparingly to use accent; do not repeat hex values or introduce extra colors.
+- print: medium, texture and reproduction treatment without obscuring text.
+- articleLength: a per-page character range plus the required copy structure (paragraphs, panel dialogue, lists, clues, etc.).
+- avoid: specific unwanted traits or failure modes from this concept; no blanket rules that contradict the requested format.
+Keep issue numbers, dates, article-specific content and furniture text out of this reusable guide. Check that all page treatments share the core, typography, palette and print treatment.
+PUBLICATION NAME (name must match exactly): ` + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + "\nORIGINAL USER REQUEST:\n" + style + "\nINFERRED BRIEF JSON:\n" + compactJSON(brief)
 	if referencePath != "" {
 		prompt += "\n\nReference image URL: " + referencePath + "\nUse it only as visual inspiration for palette, typography mood, texture and layout feeling."
 	}
@@ -35,11 +53,12 @@ func (s *server) enhanceStyle(ctx context.Context, title, style, referencePath s
 	if err := s.runDefapiTextJSON(ctx, prompt, 6000, &parsed); err != nil {
 		return magazineStyle{}, err
 	}
+	parsed.Name = emptyDefault(title, "Untitled Magazine")
 	return normalizeStyle(parsed), nil
 }
 
 func (s *server) generateStyleBrief(ctx context.Context, title, style string) (styleBrief, error) {
-	prompt := "Return only valid compact JSON. No markdown, no prose. Required keys: language, format, tone, articleLength, notes. Infer the intended publication format from the user's style request. articleLength must include a character range and structure note, such as '220-650 chars; short comic panel beats' or '1200-2200 chars; essay paragraphs'. Keep each value under 180 characters.\n\nPUBLICATION NAME: " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + "\nUSER STYLE:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
+	prompt := "Return only valid compact JSON. No markdown, no prose. Required keys: language, format, tone, articleLength, notes. Infer the intended publication format from the user's style request. articleLength must include a character range and structure note, such as '220-650 chars; short comic panel beats' or '1200-2200 chars; essay paragraphs'. Keep each value under 180 characters. Preserve explicit language, era, audience, visual medium, unusual formats and exclusions in notes; do not substitute generic editorial conventions.\n\nPUBLICATION NAME: " + strconv.Quote(emptyDefault(title, "Untitled Magazine")) + "\nUSER STYLE:\n" + emptyDefault(style, "clean contemporary general-interest magazine")
 	var brief styleBrief
 	if err := s.runDefapiTextJSON(ctx, prompt, 3000, &brief); err != nil {
 		return styleBrief{}, err
@@ -77,6 +96,9 @@ func (s *server) generateIssueContext(ctx context.Context, req buildRequest, sty
 
 func (s *server) generateCreativeKit(ctx context.Context, req buildRequest, style magazineStyle, issue issueContext) (creativeKit, error) {
 	prompt := fmt.Sprintf("Return only valid compact JSON. Required keys: departments, adverts, sidebars, backPage. Make departments and sidebars arrays of 18-24 unique short strings each. Make adverts and backPage arrays of 10-16 unique short strings each. Every string must describe one specific reusable page element, never a duplicate or near-duplicate. Do not include reusable image text or image-text labels in this issue-wide kit; image text must be derived from each article at page-render time. Prepare issue-wide generic page elements for a %s called %q. Match this style and tone: %s. Issue context: %s. Use that exact issue number/date/year when an element needs issue metadata; otherwise omit issue metadata. Do not invent a different issue number, year or date. Avoid copyrighted brands unless supplied by the user.\n\nArticles:\n%s", emptyDefault(req.MagazineType, "magazine"), emptyDefault(req.Title, "Untitled Magazine"), styleLine(style, "content"), issueContextLine(issue), articleList(req.Articles))
+	prompt += "\nMODULE STYLE RULES JSON:\n" + compactJSON(map[string]string{
+		"departments": style.Filler, "adverts": style.Advert, "sidebars": style.Short, "backPage": style.Back,
+	}) + "\nApply each pool's style rules. Reuse the guide's visual motifs, while varying content; do not invent a different design system for each module."
 	var kit creativeKit
 	if err := s.runDefapiTextJSON(ctx, prompt, 7000, &kit); err != nil {
 		return creativeKit{}, err
@@ -94,7 +116,7 @@ func (s *server) generateBrandAssets(ctx context.Context, workspace string, req 
 			"language":    emptyDefault(style.Language, "English"),
 			"tone":        emptyDefault(style.Tone, "editorial"),
 		},
-		"style": stylePromptBlock(style, "cover"),
+		"style": stylePromptBlock(style, "brand-assets"),
 		"content": map[string]any{
 			"assets_to_draw": []string{
 				"large cover masthead — publication name only, in the publication's headline typeface",
@@ -113,7 +135,7 @@ func (s *server) generateBrandAssets(ctx context.Context, workspace string, req 
 	}
 	return []brandAsset{{
 		Kind:      "brand-sheet",
-		Label:     "Masthead, running-header wordmark, issue number mark, divider and color palette",
+		Label:     "Masthead, running-header wordmark, issue number mark and divider",
 		Image:     image.Image,
 		PublicURL: image.PublicURL,
 		Prompt:    prompt,
@@ -123,14 +145,14 @@ func (s *server) generateBrandAssets(ctx context.Context, workspace string, req 
 func (s *server) rewriteArticleForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
 	pages := normalizedArticlePages(a)
 	bodyMax := articleBodyMaxChars(style, a)
-	bodyRange := fmt.Sprintf("900-%d", bodyMax)
+	length := articleLengthGuidanceFromStyle(style.ArticleLength)
+	bodyRange := length.Range
 	bodySample := compact(a.Body, 3200*pages)
 	maxTokens := maxTokensForCharTarget(bodyMax)
 	if maxTokens < 4000 {
 		maxTokens = 4000
 	}
 	if a.Kind == "podcast" {
-		bodyRange = fmt.Sprintf("1800-%d", max(2800, bodyMax))
 		bodySample = sampleLongText(a.Body, 6500)
 		maxTokens = max(maxTokens, 3000)
 	}
@@ -170,7 +192,7 @@ func (s *server) rewriteArticleForStyleMultiPage(ctx context.Context, a article,
 			pageDescs[i] = fmt.Sprintf("page %d: continuation — body columns, pull quotes, closing (~%d chars)", i+1, perPage)
 		}
 	}
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and sections. sections is an array of exactly %d objects, one per magazine page, each with keys body and image_brief. body is the print-ready article text for that page in the publication style. image_brief is 1-3 sentences describing what to draw or photograph for that page — write it as a visual instruction to an image generator, not as prose. Rewrite this source to fit this %d-page layout: %s. Body length guidance per page: %s. Style: %s. Remove web/navigation language, links, embeds and SEO clutter.\n\nSTYLE AND TONE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s",
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and sections. sections is an array of exactly %d objects, one per magazine page, each with keys body and image_brief. body is the print-ready article text for that page in the publication style. image_brief is 1-3 sentences describing what to draw or photograph for that page — write it as a visual instruction to an image generator, not as prose. Rewrite this source to fit this %d-page layout: %s. Body length guidance per page: %s. Style: %s. Preserve source facts, names, chronology, attribution and uncertainty. Do not invent quotes, statistics or events. Adapt the structure to comics, satire or other requested formats without changing source facts. Keep a consistent description of recurring people and settings in every image_brief; each page is rendered independently. Remove web/navigation language, links, embeds and SEO clutter.\n\nSTYLE AND TONE: %s\n\nSOURCE TITLE: %s\nSOURCE BODY: %s",
 		pages, pages, strings.Join(pageDescs, "; "), bodyRange, lengthNote, styleLine(style, "article"), a.Title, bodySample)
 	var out struct {
 		Title    string           `json:"title"`
@@ -178,6 +200,14 @@ func (s *server) rewriteArticleForStyleMultiPage(ctx context.Context, a article,
 	}
 	if err := s.runDefapiTextJSON(ctx, prompt, maxTokens, &out); err != nil {
 		return a, err
+	}
+	if len(out.Sections) != pages {
+		return a, fmt.Errorf("expected %d article sections, got %d", pages, len(out.Sections))
+	}
+	for i, section := range out.Sections {
+		if strings.TrimSpace(section.Body) == "" || strings.TrimSpace(section.ImageBrief) == "" {
+			return a, fmt.Errorf("article section %d needs both body copy and an image brief", i+1)
+		}
 	}
 	if strings.TrimSpace(out.Title) != "" {
 		a.Title = cleanText(out.Title)
@@ -225,8 +255,9 @@ func (s *server) rewriteManualArticleForStyle(ctx context.Context, a article, st
 }
 
 func (s *server) rewriteFeatureForStyle(ctx context.Context, a article, style magazineStyle) (article, error) {
-	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Turn this requested magazine feature page into a precise image-generation brief matching the publication style. The feature can be a crossword, comments page, quiz, TV/program listings, puzzle page, letters, classifieds, calendar, chart, or any other non-article department. Preserve the user's intent, but make it print-ready and specific about sections/modules. Body should be 700-1400 characters and describe what the page should contain.\n\nSTYLE: %s\n\nFEATURE TITLE: %s\nFEATURE REQUEST: %s", styleLine(style, "filler"), a.Title, compact(a.Body, 2400))
-	text, err := s.runDefapiText(ctx, prompt, 2000)
+	length := articleLengthGuidanceFromStyle(style.ArticleLength)
+	prompt := fmt.Sprintf("Return only valid compact JSON with keys title and body. Turn this requested magazine feature page into a precise image-generation brief matching the publication style. The feature can be a crossword, comments page, quiz, TV/program listings, puzzle page, letters, classifieds, calendar, chart, or any other non-article department. Preserve the user's intent, but make it print-ready and specific about sections/modules. Body should be %s characters and describe what the page should contain. Follow this format guidance: %s.\n\nSTYLE: %s\n\nFEATURE TITLE: %s\nFEATURE REQUEST: %s", length.Range, length.Guidance, styleLine(style, "filler"), a.Title, compact(a.Body, 2400))
+	text, err := s.runDefapiText(ctx, prompt, length.MaxTokens)
 	if err != nil {
 		return a, err
 	}
@@ -430,7 +461,8 @@ func (s *server) generateArticles(ctx context.Context, title string, style magaz
 	var out struct {
 		Articles []article `json:"articles"`
 	}
-	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of exactly %d objects. Each object must have title and body. Generate original fictional-but-plausible magazine articles that fit this publication. Do not use real copyrighted brands unless generic/current facts are unavoidable. Vary article types: one feature, one short news item, one practical/service piece, one opinion/interview/list if count allows. Body length 900-1500 characters each, ready for print layout.\n\nPUBLICATION: %s\nSTYLE: %s", count, emptyDefault(title, "Untitled Magazine"), styleLine(style, "article"))
+	length := articleLengthGuidanceFromStyle(style.ArticleLength)
+	prompt := fmt.Sprintf("Return only valid compact JSON with key articles, an array of exactly %d objects. Each object must have title and body. Generate original fictional-but-plausible magazine articles that fit this publication. Do not use real copyrighted brands unless generic/current facts are unavoidable. Vary topics and structures within the requested publication format; preserve comics, satire, puzzles, listings and other strong formats. Body length %s characters each, ready for print layout. Follow this structure guidance: %s.\n\nPUBLICATION: %s\nSTYLE: %s", count, length.Range, length.Guidance, emptyDefault(title, "Untitled Magazine"), styleLine(style, "article"))
 	maxTokens := max(7000, count*2200)
 	if maxTokens > 12000 {
 		maxTokens = 12000

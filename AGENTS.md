@@ -183,3 +183,12 @@ make run ADDR=:8080
 - Keep page copy in `content.brief_body` and illustration directions in `content.image_brief`. Multi-page sections must retain their own copy; never substitute the image brief for body text.
 - Preserve valid structured JSON through planning and furniture injection. Apply the configured image prompt budget at render time. If essential content cannot fit, report the budget error instead of cutting JSON or silently discarding instructions.
 - For visual testing, prefer the user's custom Chromium and the installed `browser:control-in-app-browser` skill. Discover the current skill path. The launcher is `/home/jonh/.local/bin/chromium-claude`; profile root is `/home/jonh/.config/chromium-claude` (`Profile 1`).
+
+## Style-guide use
+
+- Enhancement must retain the original style request alongside its inferred brief. Explicit user constraints take precedence. Keep core image treatment separate from page layout, and give each guide field concrete, nonduplicated responsibilities.
+- `styleLine` returns structured JSON for text models; do not reintroduce a whole-guide character cut that discards trailing fields.
+- `stylePromptBlock` carries core image treatment, role-specific page notes, typography, color usage, print treatment and the hex palette. Normal articles use `content`; only short stories use `short`. Posters and brand asset boards must not inherit article or cover composition.
+- Pass each creative-kit pool its relevant guide rules. Treat comic panels, puzzles and listings as real structures, not optional decoration on generic columns.
+- Normalize palette roles individually, preserving valid user/generated colors. Color-use prose describes role placement; the palette owns the hex values.
+- Remove optional modules and repeated overview before shortening style prose to meet the image budget. Preserve copy, illustration directions, palette, issue identity, furniture and constraints.

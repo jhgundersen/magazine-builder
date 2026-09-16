@@ -104,3 +104,22 @@ func TestSmartLimitPreservesEssentialContentWhenBudgetCannotFit(t *testing.T) {
 		t.Fatal("essential content must remain intact for the render caller to reject an insufficient budget")
 	}
 }
+
+func TestPromptBudgetDropsExtrasBeforeStyleOrCopy(t *testing.T) {
+	essential := map[string]any{
+		"task":           "Render",
+		"style":          map[string]any{"visual_system": strings.Repeat("Norsk tegneserie. ", 30), "palette": map[string]any{"primary": "#123456"}},
+		"metadata":       map[string]any{"issue": 23},
+		"page_furniture": map[string]any{"header": "Småstoff"},
+		"constraints":    []string{"Preserve source facts"},
+		"content":        map[string]any{"brief_body": "Ærlig brødtekst", "image_brief": "Tegn en figur"},
+	}
+	expected := compactJSON(essential)
+	content := essential["content"].(map[string]any)
+	content["modules"] = strings.Repeat("Optional sidebar. ", 100)
+	content["story_overview"] = strings.Repeat("Repeated overview. ", 100)
+	got := smartLimitImagePrompt(compactJSON(essential), len([]rune(expected)))
+	if got != expected {
+		t.Fatalf("budgeting altered essential data:\n%s\nwant:\n%s", got, expected)
+	}
+}
